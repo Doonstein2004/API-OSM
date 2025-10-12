@@ -1,10 +1,10 @@
-# scraper_valores.py
+# scraper_values.py
 import os
 import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError
-from utils import handle_popups
+from utils import handle_popups, login_to_osm
 
 load_dotenv()
 
@@ -23,20 +23,8 @@ def get_squad_values_data():
 
         try:
             # --- FASE 1: LOGIN ---
-            print("Iniciando proceso de login...")
-            page.goto("https://en.onlinesoccermanager.com/PrivacyNotice?nextUrl=%2F")
-            page.locator('button:has-text("Accept")').click()
-            login_link_button = page.locator('button:has-text("Log in")')
-            login_link_button.wait_for(state="visible", timeout=20000)
-            login_link_button.click()
-            manager_name_input = page.locator("#manager-name")
-            manager_name_input.wait_for(state="visible", timeout=10000)
-            manager_name_input.fill(os.getenv("MI_USUARIO"))
-            page.locator("#password").fill(os.getenv("MI_CONTRASENA"))
-            page.locator("#login").click()
-            page.wait_for_selector("#crew", timeout=30000)
-            print("Login exitoso.")
-            handle_popups(page)
+            if not login_to_osm(page):
+                raise Exception("El proceso de login falló. Abortando el scraper.")
 
             # --- FASE 2: BUCLE POR CADA SLOT ACTIVO ---
             all_leagues_squad_values = []
@@ -47,7 +35,7 @@ def get_squad_values_data():
                 
                 if page.url != MAIN_DASHBOARD_URL:
                     page.goto(MAIN_DASHBOARD_URL)
-                page.wait_for_selector(".career-teamslot", timeout=15000)
+                page.wait_for_selector(".career-teamslot", timeout=45000)
                 handle_popups(page)
 
                 slot = page.locator(".career-teamslot").nth(i)
@@ -62,7 +50,7 @@ def get_squad_values_data():
                 print(f"Procesando equipo: {team_name} en la liga {league_name_on_dashboard}")
 
                 slot.click()
-                page.wait_for_selector("#timers", timeout=15000)
+                page.wait_for_selector("#timers", timeout=40000)
                 handle_popups(page)
                 
                 # --- FASE 3: NAVEGAR Y EXTRAER VALORES DE EQUIPO ---
@@ -74,7 +62,7 @@ def get_squad_values_data():
                     page.locator("a[href='#standings-squad']").click()
                     
                     squad_value_panel = page.locator("#standings-squad")
-                    squad_value_panel.wait_for(state="visible", timeout=10000)
+                    squad_value_panel.wait_for(state="visible", timeout=40000)
                     print("  - Tabla de valores visible.")
 
                     squad_values_list = []
