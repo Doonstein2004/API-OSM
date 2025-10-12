@@ -1,10 +1,10 @@
-# scraper_fichajes.py
+# scraper_transfers.py
 import os
 import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError
-from utils import handle_popups
+from utils import handle_popups, login_to_osm
 
 load_dotenv()
 
@@ -15,7 +15,7 @@ def get_transfers_data():
     Extrae el historial de transferencias, manejando pop-ups y la visibilidad de elementos.
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=False)
         page = browser.new_page()
 
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
@@ -23,19 +23,8 @@ def get_transfers_data():
 
         try:
             # --- FASE 1: LOGIN (sin cambios) ---
-            print("Iniciando proceso de login...")
-            page.goto("https://en.onlinesoccermanager.com/PrivacyNotice?nextUrl=%2F")
-            page.locator('button:has-text("Accept")').click()
-            login_link_button = page.locator('button:has-text("Log in")')
-            login_link_button.wait_for(state="visible", timeout=20000)
-            login_link_button.click()
-            manager_name_input = page.locator("#manager-name")
-            manager_name_input.wait_for(state="visible", timeout=10000)
-            manager_name_input.fill(os.getenv("MI_USUARIO"))
-            page.locator("#password").fill(os.getenv("MI_CONTRASENA"))
-            page.locator("#login").click()
-            page.wait_for_selector("#crew", timeout=30000)
-            print("Login exitoso.")
+            if not login_to_osm(page):
+                raise Exception("El proceso de login falló. Abortando el scraper.")
             
             # Limpiamos cualquier pop-up que pueda aparecer justo después de iniciar sesión
             handle_popups(page)
@@ -49,7 +38,7 @@ def get_transfers_data():
                 
                 if page.url != MAIN_DASHBOARD_URL:
                     page.goto(MAIN_DASHBOARD_URL)
-                page.wait_for_selector(".career-teamslot", timeout=15000)
+                page.wait_for_selector(".career-teamslot", timeout=40000)
 
                 slot = page.locator(".career-teamslot").nth(i)
 
@@ -72,7 +61,7 @@ def get_transfers_data():
                 # 4. Navegamos DIRECTAMENTE a la página de transferencias
                 page.goto(TRANSFERS_URL)
                 
-                page.wait_for_selector("a[href='#transfer-history']", timeout=20000)
+                page.wait_for_selector("a[href='#transfer-history']", timeout=40000)
                 
                 handle_popups(page)
 
@@ -84,12 +73,12 @@ def get_transfers_data():
                     time.sleep(5)  # Esperamos un poco para que el panel tenga tiempo de activarse
                     
                     # 2. AHORA, esperamos a que el panel del historial sea visible.
-                    page.wait_for_selector("#transfer-history.active", timeout=15000)
+                    page.wait_for_selector("#transfer-history.active", timeout=40000)
                     print("  - Panel de historial visible.")
                     # --- FIN DE LA CORRECCIÓN ---
 
                     print("  - Cargando todos los registros...")
-                    while page.locator('button:has-text("More transfers")').is_visible(timeout=6000):
+                    while page.locator('button:has-text("More transfers")').is_visible(timeout=8000):
                         old_count = page.locator("#transfer-history table.table tbody tr").count()
                         page.locator('button:has-text("More transfers")').click()
                         page.wait_for_function(
@@ -101,7 +90,7 @@ def get_transfers_data():
                     print("  - Extrayendo datos de la tabla (modo optimizado)...")
 
                     # Espera que la tabla esté totalmente cargada
-                    page.wait_for_selector("#transfer-history table.table tbody tr", timeout=10000)
+                    page.wait_for_selector("#transfer-history table.table tbody tr", timeout=50000)
 
                     # Ejecutamos un script JS dentro del navegador que recorre todas las filas
                     transfers_list = page.evaluate("""
