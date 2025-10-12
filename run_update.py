@@ -15,24 +15,28 @@ LEAGUES_TO_IGNORE = ["Champions Cup 25/26", "Greece"]
 
 # --- INICIALIZAR FIREBASE ADMIN ---
 try:
-    cred = credentials.Certificate(FIREBASE_KEY_PATH)
-    firebase_admin.initialize_app(cred)
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(FIREBASE_KEY_PATH)
+        firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("? Conexión con Firebase establecida.")
 except Exception as e:
     print(f"? ERROR: No se pudo conectar a Firebase. Revisa '{FIREBASE_KEY_PATH}'. Error: {e}")
     exit()
 
-# --- FUNCIONES AUXILIARES ---
-
+# --- MODIFICACIÓN CLAVE: Función de parseo robusta ---
 def parse_value_string(value_str):
     if not isinstance(value_str, str): return 0
-    value_str = value_str.lower().strip()
+    # 1. Eliminar comas y convertir a minúsculas
+    value_str = value_str.lower().strip().replace(',', '')
+    
+    # 2. El resto de la lógica permanece igual
     if 'm' in value_str: return float(value_str.replace('m', ''))
     if 'k' in value_str: return float(value_str.replace('k', '')) / 1000
     try: return float(value_str) / 1_000_000
     except (ValueError, TypeError): return 0
 
+# --- RESTO DE FUNCIONES (Sin cambios) ---
 def normalize_team_name(name):
     if not isinstance(name, str): return ""
     prefixes_to_remove = ["fk ", "ca ", "fc ", "cd "]
@@ -83,9 +87,29 @@ def resolve_active_leagues(my_fichajes, all_leagues_data):
         else:
             print(f"  - ADVERTENCIA: El equipo '{original_name}' no se encontró en ninguna liga de 'data.json'.")
     return resolved_map
+    
+def create_dashboard_to_official_league_map(standings_data, team_to_resolved_league):
+    print("\n? Creando mapa de nombres de liga personalizados a oficiales...")
+    dashboard_map = {}
+    my_managed_teams = set(team_to_resolved_league.keys())
+    for league_standings in standings_data:
+        dashboard_name = league_standings.get("league_name")
+        found_match = False
+        for team in league_standings.get("standings", []):
+            team_name_in_standings = team.get("Club")
+            for my_team in my_managed_teams:
+                if normalize_team_name(team_name_in_standings) == normalize_team_name(my_team):
+                    official_name = team_to_resolved_league[my_team]
+                    dashboard_map[dashboard_name] = official_name
+                    print(f"  - Mapeado '{dashboard_name}' -> '{official_name}' (vía equipo '{my_team}')")
+                    found_match = True
+                    break
+            if found_match:
+                break
+    return dashboard_map
 
 def sync_leagues_with_firebase(active_league_names, all_leagues_data, db):
-    print("? Sincronizando ligas con Firebase...")
+    print("\n? Sincronizando ligas con Firebase...")
     leagues_ref = db.collection('leagues')
     firebase_leagues = {doc.to_dict().get('name'): doc.id for doc in leagues_ref.stream() if doc.to_dict().get('name')}
     print(f"? Encontradas {len(firebase_leagues)} ligas en Firebase.")
@@ -105,39 +129,34 @@ def sync_leagues_with_firebase(active_league_names, all_leagues_data, db):
                 new_doc_ref.set(new_league_payload)
                 league_id_map[league_name] = new_doc_ref.id
                 print(f"  - Liga '{league_name}' creada con ID: {new_doc_ref.id}")
+            else:
+                print(f"  - ADVERTENCIA: No se encontraron datos de equipo para '{league_name}' en data.json. Creando liga vacía.")
+                new_league_payload = {"name": league_name, "type": "standard", "teams": [], "managersByTeam": {}}
+                new_doc_ref = leagues_ref.document()
+                new_doc_ref.set(new_league_payload)
+                league_id_map[league_name] = new_doc_ref.id
+                print(f"  - Liga '{league_name}' creada con ID: {new_doc_ref.id}")
     return league_id_map
 
-# --- FUNCIÓN CON LA LÓGICA FINAL Y CORRECTA ---
 def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
-    """Traduce TODOS los fichajes y los agrupa por el nombre de la liga resuelta."""
     grouped_transfers = defaultdict(list)
-
     for team_block in fichajes_data:
         my_team_name = team_block.get("team_name")
         league_name = team_to_resolved_league.get(my_team_name)
-
         if not league_name:
             continue
-        
         for transfer in team_block.get("transfers", []):
             from_parts = transfer.get("From", "").split('\n')
             to_parts = transfer.get("To", "").split('\n')
             from_manager = from_parts[1] if len(from_parts) > 1 else None
             to_manager = to_parts[1] if len(to_parts) > 1 else None
-            
             managerName, transaction_type = (None, None)
-
-            # Lógica para identificar al mánager y el tipo de transacción en CUALQUIER fichaje
             if to_manager:
-                # Si hay un manager en el destino, es una COMPRA para ese manager
                 managerName = to_manager
                 transaction_type = 'purchase'
             elif from_manager:
-                # Si no, y hay un manager en el origen, es una VENTA de ese manager (a la CPU)
                 managerName = from_manager
                 transaction_type = 'sale'
-
-            # Si el fichaje involucra al menos a un mánager, lo procesamos
             if managerName and transaction_type:
                 grouped_transfers[league_name].append({
                     "playerName": transfer.get("Name"), "managerName": managerName,
@@ -152,20 +171,16 @@ def upload_data_to_firebase(grouped_transfers, league_id_map, db):
         if league_name in LEAGUES_TO_IGNORE:
             print(f"\n? Omitiendo subida para la liga ignorada: '{league_name}'")
             continue
-        
         league_id = league_id_map.get(league_name)
         if not league_id: continue
-            
         print(f"\n? Actualizando fichajes para '{league_name}' (ID: {league_id})...")
         transfers_ref = db.collection('leagues').document(league_id).collection('transfers')
-        
         old_docs = list(transfers_ref.stream())
         if old_docs:
             batch = db.batch()
             for doc in old_docs: batch.delete(doc.reference)
             batch.commit()
             print(f"  - {len(old_docs)} fichajes antiguos eliminados.")
-        
         if transfers:
             batch = db.batch()
             for t in transfers:
@@ -174,6 +189,72 @@ def upload_data_to_firebase(grouped_transfers, league_id_map, db):
             batch.commit()
             print(f"  - {len(transfers)} nuevos fichajes subidos.")
 
+def sync_standings_with_firebase(standings_data, league_id_map, dashboard_to_official_map, db):
+    print("\n? Sincronizando clasificaciones con Firebase...")
+    for league_standings in standings_data:
+        dashboard_name = league_standings.get("league_name")
+        standings = league_standings.get("standings")
+        if dashboard_name in LEAGUES_TO_IGNORE:
+            print(f"  - Omitiendo clasificación para la liga ignorada: '{dashboard_name}'")
+            continue
+        official_name = dashboard_to_official_map.get(dashboard_name)
+        if not official_name:
+            print(f"  - ADVERTENCIA: No se pudo resolver el nombre oficial para '{dashboard_name}'. Saltando clasificación.")
+            continue
+        league_id = league_id_map.get(official_name)
+        if not league_id:
+            print(f"  - ADVERTENCIA: No se encontró ID de Firebase para la liga oficial '{official_name}'. Saltando clasificación.")
+            continue
+        if standings:
+            try:
+                league_ref = db.collection('leagues').document(league_id)
+                league_ref.update({"standings": standings})
+                print(f"  - Clasificación de '{dashboard_name}' ({len(standings)} equipos) actualizada en la liga '{official_name}'.")
+            except Exception as e:
+                print(f"  - ERROR al actualizar la clasificación de '{official_name}': {e}")
+
+def sync_manager_and_value_data(standings_data, squad_values_data, league_id_map, dashboard_to_official_map, db):
+    print("\n? Sincronizando Mánagers y Valores de Equipo...")
+    updates_per_league = defaultdict(lambda: {"managers": {}, "values": {}})
+    for league_standings in standings_data:
+        dashboard_name = league_standings.get("league_name")
+        official_name = dashboard_to_official_map.get(dashboard_name)
+        if official_name:
+            for team in league_standings.get("standings", []):
+                if team.get("Manager") and team.get("Manager") != "N/A":
+                    updates_per_league[official_name]["managers"][team["Club"]] = team["Manager"]
+    for league_values in squad_values_data:
+        dashboard_name = league_values.get("league_name")
+        official_name = dashboard_to_official_map.get(dashboard_name)
+        if official_name:
+            for team in league_values.get("squad_values_ranking", []):
+                updates_per_league[official_name]["values"][team["Club"]] = parse_value_string(team["Value"])
+    for official_name, data in updates_per_league.items():
+        league_id = league_id_map.get(official_name)
+        if not league_id:
+            continue
+        try:
+            league_ref = db.collection('leagues').document(league_id)
+            doc = league_ref.get()
+            if not doc.exists:
+                print(f"  - ADVERTENCIA: El documento de la liga '{official_name}' no existe. Saltando actualización de mánagers/valores.")
+                continue
+            league_doc_data = doc.to_dict()
+            managersByTeam = data["managers"]
+            updated_teams = league_doc_data.get("teams", [])
+            for team_obj in updated_teams:
+                team_name = team_obj.get("name")
+                if team_name in data["values"]:
+                    team_obj["currentValue"] = data["values"][team_name]
+            update_payload = {
+                "managersByTeam": managersByTeam,
+                "teams": updated_teams
+            }
+            league_ref.update(update_payload)
+            print(f"  - Mánagers ({len(managersByTeam)}) y Valores de Equipo ({len(data['values'])}) actualizados para '{official_name}'.")
+        except Exception as e:
+            print(f"  - ERROR al actualizar mánagers/valores para '{official_name}': {e}")
+
 def run_full_automation():
     print("? Leyendo archivos JSON de los scrapers...")
     try:
@@ -181,28 +262,37 @@ def run_full_automation():
             all_leagues_data = json.load(f).get('data', [])
         with open("fichajes_data.json", "r", encoding='utf-8') as f:
             fichajes_data = json.load(f)
+        with open("standings_output.json", "r", encoding='utf-8') as f:
+            standings_data = json.load(f)
+        with open("squad_values_data.json", "r", encoding='utf-8') as f:
+            squad_values_data = json.load(f)
     except FileNotFoundError as e:
-        print(f"? ERROR: Archivo no encontrado. Asegúrate de haber ejecutado los scrapers primero. {e}")
+        print(f"? ERROR: Archivo no encontrado. Asegúrate de haber ejecutado todos los scrapers primero. {e}")
         return
 
-    print("\n? Descubriendo y resolviendo ligas activas...")
+    print("\n? Descubriendo y resolviendo ligas activas (basado en fichajes)...")
     team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data)
     
-    active_league_names = set(team_to_resolved_league.values())
-    filtered_active_leagues = {name for name in active_league_names if name not in LEAGUES_TO_IGNORE}
+    dashboard_to_official_map = create_dashboard_to_official_league_map(standings_data, team_to_resolved_league)
     
-    if not filtered_active_leagues:
-        print("? No se encontraron ligas activas (o todas fueron ignoradas). Finalizando.")
+    official_leagues_from_transfers = set(team_to_resolved_league.values())
+    filtered_leagues_to_process = {name for name in official_leagues_from_transfers if name not in LEAGUES_TO_IGNORE}
+    
+    if not filtered_leagues_to_process:
+        print("? No se encontraron ligas con fichajes para procesar. Finalizando.")
         return
-    print(f"? Ligas activas a procesar: {list(filtered_active_leagues)}")
+    print(f"\n? Ligas oficiales a procesar: {list(filtered_leagues_to_process)}")
 
-    league_id_map = sync_leagues_with_firebase(filtered_active_leagues, all_leagues_data, db)
+    league_id_map = sync_leagues_with_firebase(filtered_leagues_to_process, all_leagues_data, db)
+    
+    sync_manager_and_value_data(standings_data, squad_values_data, league_id_map, dashboard_to_official_map, db)
 
     print("\n? Traduciendo datos de fichajes al formato de la aplicación...")
-    # La variable my_manager_names ya no es necesaria aquí
     grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
     
     upload_data_to_firebase(grouped_transfers, league_id_map, db)
+    
+    sync_standings_with_firebase(standings_data, league_id_map, dashboard_to_official_map, db)
     
     print("\n? Proceso de sincronización completado.")
 
