@@ -16,7 +16,7 @@ def get_standings_data():
     Extrae la tabla de clasificación general para cada liga gestionada.
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"

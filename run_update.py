@@ -41,11 +41,16 @@ def parse_value_string(value_str):
     value_str = value_str.lower().strip().replace(',', '')
     
     # 2. El resto de la lógica permanece igual
+    # 1. Eliminar comas y convertir a minúsculas
+    value_str = value_str.lower().strip().replace(',', '')
+    
+    # 2. El resto de la lógica permanece igual
     if 'm' in value_str: return float(value_str.replace('m', ''))
     if 'k' in value_str: return float(value_str.replace('k', '')) / 1000
     try: return float(value_str) / 1_000_000
     except (ValueError, TypeError): return 0
 
+# --- RESTO DE FUNCIONES (Sin cambios) ---
 # --- RESTO DE FUNCIONES (Sin cambios) ---
 def normalize_team_name(name):
     if not isinstance(name, str): return ""
@@ -295,6 +300,72 @@ def get_all_leagues_from_db(cursor):
 
     
 
+def sync_standings_with_firebase(standings_data, league_id_map, dashboard_to_official_map, db):
+    print("\n? Sincronizando clasificaciones con Firebase...")
+    for league_standings in standings_data:
+        dashboard_name = league_standings.get("league_name")
+        standings = league_standings.get("standings")
+        if dashboard_name in LEAGUES_TO_IGNORE:
+            print(f"  - Omitiendo clasificación para la liga ignorada: '{dashboard_name}'")
+            continue
+        official_name = dashboard_to_official_map.get(dashboard_name)
+        if not official_name:
+            print(f"  - ADVERTENCIA: No se pudo resolver el nombre oficial para '{dashboard_name}'. Saltando clasificación.")
+            continue
+        league_id = league_id_map.get(official_name)
+        if not league_id:
+            print(f"  - ADVERTENCIA: No se encontró ID de Firebase para la liga oficial '{official_name}'. Saltando clasificación.")
+            continue
+        if standings:
+            try:
+                league_ref = db.collection('leagues').document(league_id)
+                league_ref.update({"standings": standings})
+                print(f"  - Clasificación de '{dashboard_name}' ({len(standings)} equipos) actualizada en la liga '{official_name}'.")
+            except Exception as e:
+                print(f"  - ERROR al actualizar la clasificación de '{official_name}': {e}")
+
+def sync_manager_and_value_data(standings_data, squad_values_data, league_id_map, dashboard_to_official_map, db):
+    print("\n? Sincronizando Mánagers y Valores de Equipo...")
+    updates_per_league = defaultdict(lambda: {"managers": {}, "values": {}})
+    for league_standings in standings_data:
+        dashboard_name = league_standings.get("league_name")
+        official_name = dashboard_to_official_map.get(dashboard_name)
+        if official_name:
+            for team in league_standings.get("standings", []):
+                if team.get("Manager") and team.get("Manager") != "N/A":
+                    updates_per_league[official_name]["managers"][team["Club"]] = team["Manager"]
+    for league_values in squad_values_data:
+        dashboard_name = league_values.get("league_name")
+        official_name = dashboard_to_official_map.get(dashboard_name)
+        if official_name:
+            for team in league_values.get("squad_values_ranking", []):
+                updates_per_league[official_name]["values"][team["Club"]] = parse_value_string(team["Value"])
+    for official_name, data in updates_per_league.items():
+        league_id = league_id_map.get(official_name)
+        if not league_id:
+            continue
+        try:
+            league_ref = db.collection('leagues').document(league_id)
+            doc = league_ref.get()
+            if not doc.exists:
+                print(f"  - ADVERTENCIA: El documento de la liga '{official_name}' no existe. Saltando actualización de mánagers/valores.")
+                continue
+            league_doc_data = doc.to_dict()
+            managersByTeam = data["managers"]
+            updated_teams = league_doc_data.get("teams", [])
+            for team_obj in updated_teams:
+                team_name = team_obj.get("name")
+                if team_name in data["values"]:
+                    team_obj["currentValue"] = data["values"][team_name]
+            update_payload = {
+                "managersByTeam": managersByTeam,
+                "teams": updated_teams
+            }
+            league_ref.update(update_payload)
+            print(f"  - Mánagers ({len(managersByTeam)}) y Valores de Equipo ({len(data['values'])}) actualizados para '{official_name}'.")
+        except Exception as e:
+            print(f"  - ERROR al actualizar mánagers/valores para '{official_name}': {e}")
+
 def run_full_automation():
     print("- Leyendo archivos JSON de los scrapers...")
     try:
@@ -302,6 +373,10 @@ def run_full_automation():
             all_leagues_data = json.load(f).get('data', [])
         with open("fichajes_data.json", "r", encoding='utf-8') as f:
             fichajes_data = json.load(f)
+        with open("standings_output.json", "r", encoding='utf-8') as f:
+            standings_data = json.load(f)
+        with open("squad_values_data.json", "r", encoding='utf-8') as f:
+            squad_values_data = json.load(f)
         with open("standings_output.json", "r", encoding='utf-8') as f:
             standings_data = json.load(f)
         with open("squad_values_data.json", "r", encoding='utf-8') as f:
@@ -344,3 +419,4 @@ def run_full_automation():
 
 if __name__ == "__main__":
     run_full_automation()
+

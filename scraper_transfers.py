@@ -1,9 +1,11 @@
 # scraper_transfers.py
+# scraper_transfers.py
 import os
 import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError
+from utils import handle_popups, login_to_osm
 from utils import handle_popups, login_to_osm
 
 load_dotenv()
@@ -13,6 +15,7 @@ def get_transfers_data():
     Extrae el historial de transferencias con una robusta lógica de reintentos y esperas inteligentes.
     """
     with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
         browser = p.chromium.launch(headless=False)
         page = browser.new_page()
 
@@ -34,6 +37,7 @@ def get_transfers_data():
                 # Reseteamos al estado inicial en cada iteración del bucle principal
                 if page.url != MAIN_DASHBOARD_URL:
                     page.goto(MAIN_DASHBOARD_URL)
+                page.wait_for_selector(".career-teamslot", timeout=40000)
                 page.wait_for_selector(".career-teamslot", timeout=40000)
 
                 slot = page.locator(".career-teamslot").nth(i)
