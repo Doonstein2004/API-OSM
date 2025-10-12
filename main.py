@@ -2,50 +2,102 @@
 import datetime
 import json
 import os
+import psycopg2
+import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware # Necesario para el frontend
+
 from scraper_leagues import get_data_from_website
 from scraper_transfers import get_transfers_data
 from scraper_values import get_squad_values_data
 from scraper_table import get_standings_data
+from dotenv import load_dotenv
 
-# --- CONFIGURACIÓN (sin cambios) ---
+# --- NUEVO: Importar Pydantic ---
+from pydantic import BaseModel, Field
+from pydantic.alias_generators import to_camel
+from typing import List, Optional
+
+# --- CONFIGURACIÓN ---
+load_dotenv()
 app = FastAPI(
-    title="Mi API Privada",
-    description="Una API para obtener datos de un sitio web mediante scraping.",
-    version="1.0.0"
+    title="OSM Analysis API",
+    description="API para servir datos de OSM y ejecutar scrapers.",
+    version="2.0.0"
 )
 API_KEY = "$#N!7!T8sGkRmz8vD9Uhr9s&mq&xpc3NBKC2BpN*GX98bKMNDsf2!"
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
-DATA_FILE = "data.json" # <--- 3. Definir el nombre del archivo de datos
 
-# --- CACHÉ EN MEMORIA (ahora se inicializa desde el archivo) ---
-cache = {
-    "data": None,
-    "last_updated": "Nunca"
+# --- NUEVO: Configuración de CORS ---
+# Permite que tu frontend (que corre en otro dominio/puerto) pueda hacerle peticiones a esta API
+origins = [
+    "http://localhost",
+    "http://localhost:8080",
+    "http://127.0.0.1",
+    "http://127.0.0.1:5500", # Típico puerto de Live Server en VSCode para archivos HTML
+    "null", # Para permitir abrir el index.html directamente desde el sistema de archivos
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # O sé más restrictivo con la lista `origins`
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# --- NUEVO: Conexión a la base de datos ---
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"), "port": os.getenv("DB_PORT"),
+    "dbname": os.getenv("DB_NAME"), "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD")
 }
 
-# --- 4. NUEVAS FUNCIONES AUXILIARES PARA MANEJAR EL ARCHIVO ---
-def save_data_to_json(data_to_save):
-    """Guarda el diccionario de datos en el archivo JSON."""
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data_to_save, f, ensure_ascii=False, indent=4)
-    print(f"Datos guardados exitosamente en {DATA_FILE}")
 
-def load_data_from_json():
-    """Carga los datos desde el archivo JSON si existe."""
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            print(f"Cargando datos desde {DATA_FILE}...")
-            return json.load(f)
-    return {"data": None, "last_updated": "Nunca"} # Devuelve caché vacía si el archivo no existe
+class CamelModel(BaseModel):
+    """Un modelo base que convierte snake_case a camelCase automáticamente."""
+    class Config:
+        from_attributes = True
+        alias_generator = to_camel # <-- La magia está aquí
+        populate_by_name = True # Permite usar tanto el nombre original como el alias
 
-# --- 5. MODIFICACIÓN: Cargar datos al iniciar la aplicación ---
-@app.on_event("startup")
-def startup_event():
-    """Al iniciar la API, carga la caché desde el archivo JSON."""
-    global cache
-    cache = load_data_from_json()
+
+class League(CamelModel):
+    id: int
+    name: str
+    type: str
+
+class LeagueDetails(League):
+    teams: Optional[list] = []
+    managers_by_team: Optional[dict] = {} # El nombre del atributo coincide con la BD
+    standings: Optional[list] = []
+
+class Transfer(CamelModel):
+    id: int
+    player_name: str # El nombre del atributo coincide con la BD
+    manager_name: str # El nombre del atributo coincide con la BD
+    transaction_type: str # El nombre del atributo coincide con la BD
+    position: str
+    round: int
+    base_value: float # El nombre del atributo coincide con la BD
+    final_price: float # El nombre del atributo coincide con la BD
+    created_at: datetime.datetime # El nombre del atributo coincide con la BD
+
+    class Config:
+        from_attributes = True
+
+def get_db_connection():
+    """Establece y devuelve una conexión a la base de datos."""
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        # Usar un cursor de diccionario para obtener resultados como objetos {columna: valor}
+        conn.cursor_factory = psycopg2.extras.DictCursor
+        return conn
+    except psycopg2.OperationalError as e:
+        raise HTTPException(status_code=500, detail=f"Error de conexión con la base de datos: {e}")
+    
 
 # --- LÓGICA DE SEGURIDAD (sin cambios) ---
 async def get_api_key(api_key_header: str = Security(api_key_header)):
@@ -56,6 +108,51 @@ async def get_api_key(api_key_header: str = Security(api_key_header)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Clave de API no válida o ausente",
         )
+        
+
+# --- ENDPOINTS DE LECTURA (MODIFICADOS) --- 
+@app.get("/api/leagues", response_model=List[League], response_model_by_alias=True)
+def get_all_leagues():
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, type FROM leagues ORDER BY name ASC;")
+            leagues_data = cur.fetchall()
+            # CORRECCIÓN: Reintroducir la conversión explícita a dict
+            return [dict(row) for row in leagues_data]
+    finally:
+        conn.close()
+
+@app.get("/api/leagues/{league_id}", response_model=LeagueDetails, response_model_by_alias=True)
+def get_league_data(league_id: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, type, teams, managers_by_team, standings FROM leagues WHERE id = %s;", (league_id,))
+            league_data = cur.fetchone()
+            if not league_data:
+                raise HTTPException(status_code=404, detail="Liga no encontrada")
+            # CORRECCIÓN: Reintroducir la conversión explícita a dict
+            return dict(league_data)
+    finally:
+        conn.close()
+
+@app.get("/api/leagues/{league_id}/transfers", response_model=List[Transfer], response_model_by_alias=True)
+def get_league_transfers(league_id: int):
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, player_name, manager_name, transaction_type, position, round, base_value, final_price, created_at 
+                FROM transfers 
+                WHERE league_id = %s 
+                ORDER BY created_at ASC;
+            """, (league_id,))
+            transfers_data = cur.fetchall()
+            # CORRECCIÓN: Reintroducir la conversión explícita a dict
+            return [dict(row) for row in transfers_data]
+    finally:
+        conn.close()
 
 # --- ENDPOINTS DE LA API (con una pequeña modificación) ---
 @app.get("/")
@@ -151,7 +248,7 @@ def refresh_standings_league():
         if "error" in scraped_data:
              raise HTTPException(status_code=500, detail=scraped_data["error"])
 
-        with open("squad_values_data.json", "w", encoding="utf-8") as f:
+        with open("standings_output.json", "w", encoding="utf-8") as f:
             json.dump(scraped_data, f, ensure_ascii=False, indent=4)
 
         print("Datos de valores de equipo actualizados y guardados.")

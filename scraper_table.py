@@ -1,10 +1,10 @@
-# scraper_clasificacion.py
+# scraper_table.py
 import os
 import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError
-from utils import handle_popups
+from utils import handle_popups, login_to_osm
 
 
 load_dotenv()
@@ -24,20 +24,8 @@ def get_standings_data():
 
         try:
             # --- FASE 1: LOGIN ---
-            print("Iniciando proceso de login...")
-            page.goto("https://en.onlinesoccermanager.com/PrivacyNotice?nextUrl=%2F")
-            page.locator('button:has-text("Accept")').click()
-            login_link_button = page.locator('button:has-text("Log in")')
-            login_link_button.wait_for(state="visible", timeout=20000)
-            login_link_button.click()
-            manager_name_input = page.locator("#manager-name")
-            manager_name_input.wait_for(state="visible", timeout=10000)
-            manager_name_input.fill(os.getenv("MI_USUARIO"))
-            page.locator("#password").fill(os.getenv("MI_CONTRASENA"))
-            page.locator("#login").click()
-            page.wait_for_selector("#crew", timeout=30000)
-            print("Login exitoso.")
-            handle_popups(page)
+            if not login_to_osm(page):
+                raise Exception("El proceso de login falló. Abortando el scraper.")
 
             # --- FASE 2: BUCLE POR CADA SLOT ACTIVO ---
             all_leagues_standings = []
@@ -48,7 +36,7 @@ def get_standings_data():
                 
                 if page.url != MAIN_DASHBOARD_URL:
                     page.goto(MAIN_DASHBOARD_URL)
-                page.wait_for_selector(".career-teamslot", timeout=15000)
+                page.wait_for_selector(".career-teamslot", timeout=35000)
                 handle_popups(page)
 
                 slot = page.locator(".career-teamslot").nth(i)
@@ -62,7 +50,7 @@ def get_standings_data():
                 print(f"Procesando equipo: {team_name} en la liga {league_name_on_dashboard}")
 
                 slot.click()
-                page.wait_for_selector("#timers", timeout=15000)
+                page.wait_for_selector("#timers", timeout=45000)
                 handle_popups(page)
                 
                 # --- FASE 3: NAVEGAR Y EXTRAER CLASIFICACIÓN ---
@@ -70,13 +58,16 @@ def get_standings_data():
                     print(f"  - Navegando a la clasificación de la liga...")
                     page.goto(LEAGUE_TABLE_URL)
                     
-                    # Esperamos a que la tabla principal sea visible
-                    standings_table = page.locator("table.table-sticky")
-                    standings_table.wait_for(state="visible", timeout=10000)
+                    # --- CORRECCIÓN FINAL ---
+                    # Usamos un selector que busca la tabla que CONTIENE el encabezado 'Pts'
+                    standings_table_selector = "table.table-sticky:has(th:has-text('Pts'))"
+                    
+                    page.wait_for_selector(standings_table_selector, timeout=40000)
                     print("  - Tabla de clasificación visible.")
 
                     standings_list = []
-                    rows = standings_table.locator("tbody tr.clickable")
+                    rows = page.locator(f"{standings_table_selector} tbody tr.clickable")
+                    # --- FIN DE LA CORRECCIÓN ---
                     
                     for row in rows.all():
                         position = row.locator("td.td-ranking").inner_text()
@@ -93,17 +84,10 @@ def get_standings_data():
                         goal_difference = row.locator("td.td-goaldifference").inner_text()
                         
                         standings_list.append({
-                            "Position": int(position),
-                            "Club": club_name,
-                            "Manager": manager_name,
-                            "Played": int(played),
-                            "Won": int(won),
-                            "Drew": int(drew),
-                            "Lost": int(lost),
-                            "Points": int(points),
-                            "GoalsFor": int(goals_for),
-                            "GoalsAgainst": int(goals_against),
-                            "GoalDifference": int(goal_difference)
+                            "Position": int(position), "Club": club_name, "Manager": manager_name,
+                            "Played": int(played), "Won": int(won), "Drew": int(drew),
+                            "Lost": int(lost), "Points": int(points), "GoalsFor": int(goals_for),
+                            "GoalsAgainst": int(goals_against), "GoalDifference": int(goal_difference)
                         })
                     
                     all_leagues_standings.append({
@@ -121,8 +105,8 @@ def get_standings_data():
             error_message = f"Ocurrió un error inesperado CRÍTICO: {e}"
             print(error_message)
             try:
-                page.screenshot(path="error_valores.png")
-                print("Se ha guardado una captura de pantalla en 'error_valores.png'.")
+                page.screenshot(path="error_clasificacion.png")
+                print("Se ha guardado una captura de pantalla en 'error_clasificacion.png'.")
             except Exception as screenshot_error:
                 print(f"No se pudo tomar la captura de pantalla. Error: {screenshot_error}")
             return {"error": error_message}

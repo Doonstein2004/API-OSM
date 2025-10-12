@@ -1,0 +1,17 @@
+# docker-compose.yml
+services:
+  db:
+    image: postgres:18
+    container_name: osm-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: osm_user
+      POSTGRES_PASSWORD: osm12345
+      POSTGRES_DB: osm_analysis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
