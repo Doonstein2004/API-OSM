@@ -6,7 +6,7 @@ import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
-from fastapi.middleware.cors import CORSMiddleware # Necesario para el frontend
+from fastapi.middleware.cors import CORSMiddleware 
 
 from scraper_leagues import get_data_from_website
 from scraper_transfers import get_transfers_data
@@ -26,7 +26,7 @@ app = FastAPI(
     description="API para servir datos de OSM y ejecutar scrapers.",
     version="2.0.0"
 )
-API_KEY = "$#N!7!T8sGkRmz8vD9Uhr9s&mq&xpc3NBKC2BpN*GX98bKMNDsf2!"
+API_KEY = os.getenv("API_KEY")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 # --- NUEVO: Configuración de CORS ---
