@@ -72,7 +72,12 @@ def get_squad_values_data():
                         # Usamos los selectores correctos basados en el nuevo HTML
                         position = row.locator("td.td-ranking").inner_text()
                         club_name = row.locator("span.ellipsis").inner_text()
-                        manager_name = row.locator("span.text-italic").inner_text()
+                        manager_locator = row.locator("span.text-italic")
+                        if manager_locator.count() > 0:
+                            manager_name = manager_locator.inner_text()
+                        else:
+                            manager_name = "N/A" # Asignar un valor por defecto si no hay mánager
+                        # --- FIN DE LA CORRECCIÓN ---
                         squad_value = row.locator("td").nth(2).locator("span.club-funds-amount").inner_text()
                         player_count = row.locator("td").nth(3).inner_text()
                         avg_value = row.locator("td").nth(4).locator("span.club-funds-amount").inner_text()
