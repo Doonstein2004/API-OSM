@@ -14,7 +14,7 @@ def get_data_from_website():
     """
     with sync_playwright() as p:
         # Para depurar, usa headless=False para ver el navegador en acción.
-        browser = p.chromium.launch(headless=False) 
+        browser = p.chromium.launch(headless=True) 
         page = browser.new_page()
 
         try:

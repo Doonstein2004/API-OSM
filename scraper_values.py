@@ -15,7 +15,7 @@ def get_squad_values_data():
     Extrae la clasificación por valor de equipo para cada liga gestionada.
     """
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
