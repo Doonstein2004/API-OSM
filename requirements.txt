@@ -1,5 +1,7 @@
-playwright
-dotenv
-psycopg2
-uvicorn
+# requirements.txt
 fastapi
+uvicorn[standard]
+psycopg2-binary
+python-dotenv
+requests
+playwright
