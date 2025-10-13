@@ -13,5 +13,17 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  api:
+    build: .
+    container_name: osm-api
+    restart: always
+    env_file:
+      - .env # Pasa las variables de entorno al contenedor
+    ports:
+      - "8000:8000" # Mapea el puerto 8000 del contenedor al puerto 8000 del servidor
+    depends_on:
+      - db # Se asegura de que la base de datos inicie primero
+
+
 volumes:
   postgres_data:
