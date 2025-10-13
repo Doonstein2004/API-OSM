@@ -16,6 +16,8 @@ Lib/
 Scripts/
 Include/
 
+pyvenv.cfg
+
 # Archivos de IDE/Editor
 .vscode/
 .idea/
