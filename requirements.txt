@@ -1,0 +1,5 @@
+playwright
+dotenv
+psycopg2
+uvicorn
+fastapi
