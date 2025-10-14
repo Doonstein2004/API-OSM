@@ -1,0 +1,19 @@
+# fly.toml - Archivo de configuración para la app api-osm
+
+# El nombre de tu aplicación en Fly.io. Esta es la línea que soluciona el error.
+app = "api-osm"
+
+# La región principal donde se despliega tu app. 
+# Cámbiala si elegiste una diferente durante el 'fly launch'.
+primary_region = "gru"
+
+# Esta sección le dice a Fly.io cómo manejar las peticiones web.
+[http_service]
+  internal_port = 8000
+  force_https = true
+  
+  # Estas 3 líneas aseguran que tu app se mantenga en el plan gratuito "always-on"
+  # después de haber ejecutado 'fly scale count 1'.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
