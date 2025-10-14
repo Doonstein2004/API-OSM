@@ -125,9 +125,6 @@ def get_all_leagues():
     finally:
         conn.close()
 
-@app.get("/api/test-cors")
-def test_cors_endpoint():
-    return {"message": "CORS está funcionando!"}
 
 @app.get("/api/leagues/{league_id}", response_model=LeagueDetails, response_model_by_alias=True)
 def get_league_data(league_id: int):
@@ -265,6 +262,7 @@ def refresh_standings_league():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al ejecutar el scraper de valores: {str(e)}")
+
 
 
 
