@@ -24,7 +24,7 @@ load_dotenv()
 app = FastAPI(
     title="OSM Analysis API",
     description="API para servir datos de OSM y ejecutar scrapers.",
-    version="2.0.0"
+    version="3.0.0"
 )
 API_KEY = os.getenv("API_KEY")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
@@ -258,5 +258,6 @@ def refresh_standings_league():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al ejecutar el scraper de valores: {str(e)}")
+
 
 
