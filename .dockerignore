@@ -1,0 +1,25 @@
+# flyctl launch added from .gitignore
+# Archivos de entorno y credenciales (¡MUY IMPORTANTE!)
+**\.env
+**\serviceAccountKey.json
+
+# Archivos de caché de Python
+**\__pycache__
+**\*.pyc
+
+# Archivos de salida JSON que ya no usaremos
+**\*.json
+
+# Carpetas de entornos virtuales
+**\venv
+venv
+**\Lib
+**\Scripts
+**\Include
+
+**\pyvenv.cfg
+
+# Archivos de IDE/Editor
+**\.vscode
+**\.idea
+fly.toml
