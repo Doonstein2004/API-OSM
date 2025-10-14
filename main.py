@@ -42,7 +42,8 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # O sé más restrictivo con la lista `origins`
+    # 2. Usa la lista 'origins' que acabas de definir, en lugar del comodín '*'.
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -257,4 +258,5 @@ def refresh_standings_league():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al ejecutar el scraper de valores: {str(e)}")
+
 
