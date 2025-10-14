@@ -37,7 +37,7 @@ origins = [
     "http://127.0.0.1",
     "http://127.0.0.1:5500", # Típico puerto de Live Server en VSCode para archivos HTML
     "https://api-osm.fly.dev",
-    "https://https://osmtransfers.netlify.app", # Para permitir abrir el index.html directamente desde el sistema de archivos
+    "https://osmtransfers.netlify.app", # Para permitir abrir el index.html directamente desde el sistema de archivos
 ]
 
 app.add_middleware(
@@ -257,3 +257,4 @@ def refresh_standings_league():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al ejecutar el scraper de valores: {str(e)}")
+
