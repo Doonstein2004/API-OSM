@@ -1,21 +1,25 @@
-# render.yaml - Versión para usar con Supabase (Recomendada)
+# render.yaml - Versión para conectar Render a una base de datos externa de Supabase
+
 services:
-  # Servicio para la API de FastAPI
+  # Servicio para la API de FastAPI que se ejecutará 24/7
   - type: web
     name: osm-api
-    env: docker
-    # Dockerfile: Render lo encontrará automáticamente si está en la raíz
+    env: docker # Le decimos a Render que use nuestro Dockerfile
     healthCheckPath: / # Render verificará que la API esté viva en la ruta raíz
     envVars:
+      # --- Configuración PÚBLICA de la Base de Datos (Seguro para subir a GitHub) ---
+      # Aquí pones los valores que encontraste en Supabase (de tu imagen)
       - key: DB_HOST
-        value: aws-1-us-east-1.pooler.supabase.com # Pega el host de Supabase aquí
+        value: aws-1-us-east-1.pooler.supabase.com 
       - key: DB_PORT
         value: 5432
       - key: DB_NAME
         value: postgres
       - key: DB_USER
         value: postgres.rchcovegcjwellhgaufv
-  # Los siguientes son secretos, los pondremos desde el dashboard de Render
+
+      # --- Declaración de SECRETOS (Los valores se ponen en el Dashboard de Render) ---
+      # Le decimos a Render que no sincronice estos valores desde este archivo.
       - key: DB_PASSWORD
         sync: false
       - key: MI_USUARIO
@@ -23,9 +27,10 @@ services:
       - key: MI_CONTRASENA
         sync: false
 
-  # Tarea programada (Cron Job) para ejecutar el scraper
+  # Tarea programada (Cron Job) que ejecutará el scraper
   - type: cron
     name: osm-scraper
     env: docker
-    schedule: "5 4 * * *" # Ejecutar todos los días a las 4:05 AM (UTC)
+    schedule: "5 4 * * *" # Se ejecuta todos los días a las 4:05 AM (UTC)
+    # El comando que se ejecutará dentro del contenedor
     command: "python run_update.py"
