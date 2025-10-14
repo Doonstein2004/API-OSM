@@ -1,3 +1,5 @@
+# render.yaml - Versión corregida según la documentación oficial de Render
+
 services:
   # Servicio 1: La API de FastAPI
   - type: web
@@ -21,9 +23,9 @@ services:
         sync: false
 
   # Servicio 2: La Tarea Programada (Cron Job)
-  # Este guion (-) debe estar exactamente alineado con el guion de arriba.
   - type: cron
     name: osm-scraper
     env: docker
     schedule: "5 4 * * *"
-    command: "python run_update.py"
+    # CORRECCIÓN: Usar 'dockerCommand' en lugar de 'command'
+    dockerCommand: "python run_update.py"
