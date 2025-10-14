@@ -1,0 +1,31 @@
+# render.yaml - Versión para usar con Supabase (Recomendada)
+services:
+  # Servicio para la API de FastAPI
+  - type: web
+    name: osm-api
+    env: docker
+    # Dockerfile: Render lo encontrará automáticamente si está en la raíz
+    healthCheckPath: / # Render verificará que la API esté viva en la ruta raíz
+    envVars:
+      - key: DB_HOST
+        value: aws-1-us-east-1.pooler.supabase.com # Pega el host de Supabase aquí
+      - key: DB_PORT
+        value: 5432
+      - key: DB_NAME
+        value: postgres
+      - key: DB_USER
+        value: postgres.rchcovegcjwellhgaufv
+  # Los siguientes son secretos, los pondremos desde el dashboard de Render
+      - key: DB_PASSWORD
+        sync: false
+      - key: MI_USUARIO
+        sync: false
+      - key: MI_CONTRASENA
+        sync: false
+
+  # Tarea programada (Cron Job) para ejecutar el scraper
+  - type: cron
+    name: osm-scraper
+    env: docker
+    schedule: "5 4 * * *" # Ejecutar todos los días a las 4:05 AM (UTC)
+    command: "python run_update.py"
