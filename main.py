@@ -36,7 +36,8 @@ origins = [
     "http://localhost:8080",
     "http://127.0.0.1",
     "http://127.0.0.1:5500", # Típico puerto de Live Server en VSCode para archivos HTML
-    "null", # Para permitir abrir el index.html directamente desde el sistema de archivos
+    "https://api-osm.fly.dev",
+    "https://https://osmtransfers.netlify.app", # Para permitir abrir el index.html directamente desde el sistema de archivos
 ]
 
 app.add_middleware(
