@@ -44,7 +44,7 @@ def handle_popups(page):
         
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
-def login_to_osm(page: Page, max_retries: int = 3):
+def login_to_osm(page: Page, max_retries: int = 5):
     """
     Gestiona el proceso completo de login en OSM, incluyendo la aceptación de cookies
     y una lógica de reintentos si el login inicial falla.
