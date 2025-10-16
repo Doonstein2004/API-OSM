@@ -183,15 +183,25 @@ def get_leagues_for_mapping(conn):
     """Obtiene los datos de las ligas desde la BD en el formato que create_league_maps necesita."""
     print("  - Obteniendo lista de ligas desde la base de datos para el mapeo...")
     with conn.cursor() as cur:
-        # Extraemos la columna 'name' como 'league_name' y la columna JSON 'teams'
-        # Esto imita la estructura que devolvía el scraper original.
         cur.execute("SELECT name AS league_name, teams FROM leagues;")
-        leagues_data = cur.fetchall()
-        # Asegurarnos de que el campo 'clubs' exista dentro del JSON 'teams'
-        for league in leagues_data:
-            if 'teams' in league and league['teams'] is not None:
-                league['clubs'] = league['teams']
-        return leagues_data
+        
+        # --- INICIO DE LA CORRECCIÓN ---
+        results = []
+        # Iteramos sobre cada fila inmutable (DictRow) que devuelve la consulta
+        for row in cur.fetchall():
+            # Convertimos la fila a un diccionario de Python normal, que sí es mutable
+            league_dict = dict(row)
+            
+            # Ahora podemos añadir la clave 'clubs' sin problemas.
+            # Usamos .get() por seguridad, en caso de que 'teams' fuera nulo.
+            league_dict['clubs'] = league_dict.get('teams', [])
+            
+            # Añadimos el nuevo diccionario a nuestra lista de resultados
+            results.append(league_dict)
+            
+        return results
+        # --- FIN DE LA CORRECCCIÓN ---
+
     
     
 def get_all_leagues_from_db(cursor):
