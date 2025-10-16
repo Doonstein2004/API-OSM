@@ -61,11 +61,15 @@ def create_league_maps(all_leagues_data):
     league_to_teams = defaultdict(set)
     for league in all_leagues_data:
         league_name = league.get("league_name")
+        # --- CORRECCIÓN: Iterar sobre 'clubs' que es una lista de diccionarios de equipo ---
         for club in league.get("clubs", []):
-            normalized_club = normalize_team_name(club["club"])
+            # --- CAMBIO CLAVE AQUÍ ---
+            # El diccionario del equipo usa la clave 'name', no 'club'.
+            normalized_club = normalize_team_name(club["name"])
             team_to_leagues[normalized_club].append(league_name)
             league_to_teams[league_name].add(normalized_club)
     return dict(team_to_leagues), dict(league_to_teams)
+
 
 def resolve_active_leagues(my_fichajes, all_leagues_data):
     my_managed_teams = {team['team_name']: team for team in my_fichajes}
@@ -185,22 +189,33 @@ def get_leagues_for_mapping(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT name AS league_name, teams FROM leagues;")
         
-        # --- INICIO DE LA CORRECCIÓN ---
         results = []
-        # Iteramos sobre cada fila inmutable (DictRow) que devuelve la consulta
         for row in cur.fetchall():
-            # Convertimos la fila a un diccionario de Python normal, que sí es mutable
+            # Convertimos la fila a un diccionario de Python normal
             league_dict = dict(row)
             
-            # Ahora podemos añadir la clave 'clubs' sin problemas.
-            # Usamos .get() por seguridad, en caso de que 'teams' fuera nulo.
-            league_dict['clubs'] = league_dict.get('teams', [])
+            # --- INICIO DE LA CORRECCIÓN CLAVE ---
+            # La columna 'teams' viene de la BD. Puede ser un string JSON o ya un objeto Python (lista).
+            teams_data = league_dict.get('teams')
             
-            # Añadimos el nuevo diccionario a nuestra lista de resultados
+            # Si es un string, lo parseamos a un objeto Python. Si no, lo usamos como está.
+            if isinstance(teams_data, str):
+                try:
+                    league_dict['clubs'] = json.loads(teams_data)
+                except json.JSONDecodeError:
+                    league_dict['clubs'] = [] # Si el JSON está corrupto, usa una lista vacía
+            else:
+                league_dict['clubs'] = teams_data or [] # Si es None o ya es una lista
+            
+            # Eliminamos la clave original 'teams' para evitar confusión
+            if 'teams' in league_dict:
+                del league_dict['teams']
+            
             results.append(league_dict)
+            # --- FIN DE LA CORRECCIÓN ---
             
         return results
-        # --- FIN DE LA CORRECCCIÓN ---
+
 
     
     
@@ -211,30 +226,53 @@ def get_all_leagues_from_db(cursor):
 def sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map):
     print("\n🔄 Sincronizando Mánagers, Valores y Clasificaciones...")
     with conn.cursor() as cur:
-        all_db_leagues = get_all_leagues_from_db(cur)
-        for league_id in all_db_leagues:
-            official_name = all_db_leagues[league_id]['name']
+
+        # 1. Iteramos solo sobre las ligas activas que nos interesan. ¡Esto es correcto!
+        for official_name, league_id in league_id_map.items():
+            if official_name in LEAGUES_TO_IGNORE: 
+                continue # Saltamos las ligas ignoradas
+
             managersByTeam, current_values, standings = {}, {}, []
             dashboard_name = next((dn for dn, on in dashboard_to_official_map.items() if on == official_name), None)
+            
+            # 2. La lógica para obtener los nuevos datos es correcta.
             if dashboard_name:
                 league_standings_data = next((ls for ls in standings_data if ls.get("league_name") == dashboard_name), None)
                 if league_standings_data:
                     standings = league_standings_data.get("standings", [])
                     for team in standings:
-                        if team.get("Manager") and team.get("Manager") != "N/A": managersByTeam[team["Club"]] = team["Manager"]
+                        if team.get("Manager") and team.get("Manager") != "N/A": 
+                            managersByTeam[team["Club"]] = team["Manager"]
+                            
                 league_values_data = next((lv for lv in squad_values_data if lv.get("league_name") == dashboard_name), None)
                 if league_values_data:
-                    for team in league_values_data.get("squad_values_ranking", []): current_values[team["Club"]] = parse_value_string(team["Value"])
-            updated_teams = all_db_leagues[league_id].get("teams", [])
+                    for team in league_values_data.get("squad_values_ranking", []): 
+                        current_values[team["Club"]] = parse_value_string(team["Value"])
+
+            # --- INICIO DE LA CORRECCIÓN ---
+            # 3. Necesitamos obtener la lista de equipos ACTUAL de la BD para esta liga específica.
+            cur.execute("SELECT teams FROM leagues WHERE id = %s;", (league_id,))
+            result = cur.fetchone()
+            
+            # Nos aseguramos de que el resultado no sea nulo y que la columna 'teams' tampoco lo sea.
+            updated_teams = result['teams'] if result and 'teams' in result else []
+            if updated_teams is None:
+                updated_teams = []
+            # --- FIN DE LA CORRECCIÓN ---
+
+            # 4. Actualizamos la lista de equipos con los nuevos valores. ¡Esto es correcto!
             for team_obj in updated_teams:
-                if team_obj.get("name") in current_values: team_obj["currentValue"] = current_values[team_obj.get("name")]
+                if team_obj.get("name") in current_values: 
+                    team_obj["currentValue"] = current_values[team_obj.get("name")]
+
+            # 5. Ejecutamos el UPDATE final para esta liga. ¡Esto es correcto!
             sql = "UPDATE leagues SET managers_by_team = %s, teams = %s, standings = %s WHERE id = %s;"
             cur.execute(sql, (json.dumps(managersByTeam), json.dumps(updated_teams), json.dumps(standings), league_id))
             print(f"  - Detalles actualizados para '{official_name}'.")
+            
     conn.commit()
 
-# --- ELIMINADO: Funciones de Firebase ---
-# Las funciones sync_standings_with_firebase y sync_manager_and_value_data han sido eliminadas.
+
 
 # --- ORQUESTADOR PRINCIPAL ---
 
