@@ -1,0 +1,42 @@
+# .github/workflows/update_leagues.yml
+name: MANUAL - Update Master Leagues List in DB
+
+on:
+  workflow_dispatch: # Solo se puede ejecutar manualmente
+
+jobs:
+  update-db:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Usamos caché para acelerar las instalaciones
+      - name: Cache Pip & Playwright
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            ~/.cache/ms-playwright
+          key: ${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Run leagues scraper and update DB
+        run: python update_leagues_in_db.py
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          MI_USUARIO: ${{ secrets.MI_USUARIO }}
+          MI_CONTRASENA: ${{ secrets.MI_CONTRASENA }}

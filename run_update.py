@@ -8,7 +8,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 
 # --- AÑADIDO: Importar las funciones de los scrapers ---
-from scraper_leagues import get_data_from_website
 from scraper_transfers import get_transfers_data
 from scraper_values import get_squad_values_data
 from scraper_table import get_standings_data
@@ -179,6 +178,22 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map):
                 print(f"  - {len(transfers)} nuevos fichajes subidos.")
     conn.commit()
 
+# --- NUEVA FUNCIÓN ---
+def get_leagues_for_mapping(conn):
+    """Obtiene los datos de las ligas desde la BD en el formato que create_league_maps necesita."""
+    print("  - Obteniendo lista de ligas desde la base de datos para el mapeo...")
+    with conn.cursor() as cur:
+        # Extraemos la columna 'name' como 'league_name' y la columna JSON 'teams'
+        # Esto imita la estructura que devolvía el scraper original.
+        cur.execute("SELECT name AS league_name, teams FROM leagues;")
+        leagues_data = cur.fetchall()
+        # Asegurarnos de que el campo 'clubs' exista dentro del JSON 'teams'
+        for league in leagues_data:
+            if 'teams' in league and league['teams'] is not None:
+                league['clubs'] = league['teams']
+        return leagues_data
+    
+    
 def get_all_leagues_from_db(cursor):
     cursor.execute("SELECT id, name, type, teams, managers_by_team, standings FROM leagues;")
     return {row['id']: dict(row) for row in cursor.fetchall()}
@@ -218,11 +233,10 @@ def run_full_automation():
     # --- PASO 1: Ejecutar los scrapers ---
     print("\n[1/5] 🌐 Ejecutando scrapers para obtener datos frescos...")
     try:
-        all_leagues_data = get_data_from_website()
         fichajes_data = get_transfers_data()
         standings_data = get_standings_data()
         squad_values_data = get_squad_values_data()
-        if any("error" in d for d in [all_leagues_data, fichajes_data, standings_data, squad_values_data]):
+        if any("error" in d for d in [fichajes_data, standings_data, squad_values_data]):
             print("❌ ERROR: Uno de los scrapers falló. Abortando la actualización.")
             return
         print("✅ Datos obtenidos con éxito de los scrapers.")
@@ -236,20 +250,33 @@ def run_full_automation():
     if not conn: return
 
     try:
-        # --- PASO 3: Lógica de procesamiento ---
+        # --- PASO 3: Lógica de procesamiento (MODIFICADO) ---
         print("\n[3/5] 🧠 Procesando y resolviendo ligas activas...")
-        team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data)
+        
+        # --- CAMBIO CLAVE: Obtenemos los datos de las ligas desde la BD ---
+        all_leagues_data_from_db = get_leagues_for_mapping(conn)
+        
+        team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data_from_db)
         dashboard_to_official_map = create_dashboard_to_official_league_map(standings_data, team_to_resolved_league)
         official_leagues_from_transfers = set(team_to_resolved_league.values())
         filtered_leagues_to_process = {name for name in official_leagues_from_transfers if name not in LEAGUES_TO_IGNORE}
+        
         if not filtered_leagues_to_process:
             print("ℹ️ No se encontraron ligas con fichajes para procesar. Finalizando.")
             return
         print(f"  - Ligas oficiales a procesar: {list(filtered_leagues_to_process)}")
 
-        # --- PASO 4: Sincronización con la Base de Datos ---
+        # --- PASO 4: Sincronización con la Base de Datos (MODIFICADO) ---
         print("\n[4/5] 🔄 Sincronizando datos con PostgreSQL...")
-        league_id_map = sync_leagues_with_postgres(conn, filtered_leagues_to_process, all_leagues_data)
+        
+        # --- CAMBIO CLAVE: Ya no necesitamos sincronizar la lista de ligas aquí ---
+        # league_id_map = sync_leagues_with_postgres(conn, filtered_leagues_to_process, all_leagues_data)
+        
+        # Obtenemos el mapa de IDs de las ligas que ya existen en la BD
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name FROM leagues;")
+            league_id_map = {name: league_id for name, league_id in cur.fetchall()}
+            
         sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map)
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
         upload_data_to_postgres(conn, grouped_transfers, league_id_map)
