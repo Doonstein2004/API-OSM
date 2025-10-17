@@ -323,7 +323,7 @@ def run_full_automation():
         # Obtenemos el mapa de IDs de las ligas que ya existen en la BD
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM leagues;")
-            league_id_map = {name: league_id for name, league_id in cur.fetchall()}
+            league_id_map = {row['name']: row['id'] for row in cur.fetchall()}
             
         sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map)
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
@@ -337,4 +337,5 @@ def run_full_automation():
             print("\n🔌 Conexión con PostgreSQL cerrada.")
 
 if __name__ == "__main__":
+
     run_full_automation()
