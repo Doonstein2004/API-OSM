@@ -1,5 +1,4 @@
-from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError, Page
-from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError, Page
+from playwright.sync_api import TimeoutError, Error as PlaywrightError, Page
 import time
 import os
 
