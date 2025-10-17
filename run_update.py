@@ -349,6 +349,19 @@ def run_full_automation():
             if name in full_league_id_map
         }
         # --- FIN DE LA CORRECCIÓN CLAVE ---
+        
+        if active_league_id_map:
+            with conn.cursor() as cur:
+                active_ids = tuple(active_league_id_map.values())
+                if len(active_ids) == 1: # Psycopg2 necesita un formato especial para tuplas de un solo elemento
+                    active_ids = f"({active_ids[0]})"
+                
+                cur.execute(
+                    f"UPDATE leagues SET is_active = TRUE, last_scraped_at = %s WHERE id IN {active_ids};",
+                    (datetime.now(),)
+                )
+                print(f"  - {cur.rowcount} ligas marcadas como activas.")
+            conn.commit()
             
         # Ahora pasamos SOLO el mapa de ligas activas a las funciones de sincronización
         sync_league_details(conn, standings_data, squad_values_data, active_league_id_map, dashboard_to_official_map)
