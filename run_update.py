@@ -300,10 +300,7 @@ def run_full_automation():
     try:
         # --- PASO 3: Lógica de procesamiento (MODIFICADO) ---
         print("\n[3/5] 🧠 Procesando y resolviendo ligas activas...")
-        
-        # --- CAMBIO CLAVE: Obtenemos los datos de las ligas desde la BD ---
         all_leagues_data_from_db = get_leagues_for_mapping(conn)
-        
         team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data_from_db)
         dashboard_to_official_map = create_dashboard_to_official_league_map(standings_data, team_to_resolved_league)
         official_leagues_from_transfers = set(team_to_resolved_league.values())
@@ -311,23 +308,31 @@ def run_full_automation():
         
         if not filtered_leagues_to_process:
             print("ℹ️ No se encontraron ligas con fichajes para procesar. Finalizando.")
-            return
+            return # El 'finally' se encargará de cerrar la conexión
         print(f"  - Ligas oficiales a procesar: {list(filtered_leagues_to_process)}")
 
-        # --- PASO 4: Sincronización con la Base de Datos (MODIFICADO) ---
+        # --- PASO 4: Sincronización con la Base de Datos (CORREGIDO) ---
         print("\n[4/5] 🔄 Sincronizando datos con PostgreSQL...")
         
-        # --- CAMBIO CLAVE: Ya no necesitamos sincronizar la lista de ligas aquí ---
-        # league_id_map = sync_leagues_with_postgres(conn, filtered_leagues_to_process, all_leagues_data)
-        
-        # Obtenemos el mapa de IDs de las ligas que ya existen en la BD
+        # Obtenemos el mapa de IDs de TODAS las ligas que ya existen en la BD
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM leagues;")
-            league_id_map = {name: league_id for name, league_id in cur.fetchall()}
+            full_league_id_map = {row['name']: row['id'] for row in cur.fetchall()}
+        
+        # --- INICIO DE LA CORRECCIÓN CLAVE ---
+        # Creamos un nuevo mapa que contiene SOLO las ligas activas que vamos a procesar.
+        active_league_id_map = {
+            name: full_league_id_map[name] 
+            for name in filtered_leagues_to_process 
+            if name in full_league_id_map
+        }
+        # --- FIN DE LA CORRECCIÓN CLAVE ---
             
-        sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map)
+        # Ahora pasamos SOLO el mapa de ligas activas a las funciones de sincronización
+        sync_league_details(conn, standings_data, squad_values_data, active_league_id_map, dashboard_to_official_map)
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
-        upload_data_to_postgres(conn, grouped_transfers, league_id_map)
+        upload_data_to_postgres(conn, grouped_transfers, active_league_id_map)
+
 
         # --- PASO 5: Finalización ---
         print("\n[5/5] ✨ Proceso de sincronización completado con éxito.")
