@@ -4,7 +4,7 @@ import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
-from utils import handle_popups,
+from utils import handle_popups
 
 
 load_dotenv()

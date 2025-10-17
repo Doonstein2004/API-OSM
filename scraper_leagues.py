@@ -3,8 +3,7 @@ import os
 import time
 import json
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright, TimeoutError, Error as PlaywrightError
-from utils import handle_popups, login_to_osm
+from playwright.sync_api import TimeoutError, Error as PlaywrightError
 
 load_dotenv()
 
