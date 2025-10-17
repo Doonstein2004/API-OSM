@@ -78,6 +78,8 @@ def login_to_osm(page: Page, max_retries: int = 5):
                 login_link_button = page.locator('button:has-text("Log in")')
                 login_link_button.wait_for(state="visible", timeout=40000)
                 login_link_button.click()
+                
+                
             except Exception as e:
                 print("No se encontro boton para ir al login")
 
@@ -93,17 +95,25 @@ def login_to_osm(page: Page, max_retries: int = 5):
             # 4. Hacer clic en el botón de login
             print("  - Haciendo clic en el botón de login...")
             page.locator("#login").click()
-
-            # 5. Verificación de éxito
-            # Esperamos por un elemento que solo existe DESPUÉS de un login exitoso.
-            page.wait_for_selector("#crew", timeout=30000)
             
-            print("  - Login exitoso verificado.")
-            handle_popups(page)
-            return True # Si llegamos aquí, el login fue exitoso
+            print("  - Verificando el éxito del login...")
+            page.wait_for_selector(
+                '#crew, a[href="/Career"]', # Espera por #crew O un link al Career dashboard
+                state='visible',
+                timeout=45000
+            )
 
-        except TimeoutError as e:
-            print(f"  - ADVERTENCIA: El intento {attempt + 1} falló (Timeout). Razón: {e}")
+            # Verificación final: asegurarnos de que no estamos en la página de registro
+            if "/Register" in page.url:
+                raise Exception("Redirigido a la página de registro, el login falló.")
+
+            print("  - ¡Login exitoso verificado!")
+            handle_popups(page)
+            return True
+
+        except Exception as e:
+            print(f"  - ADVERTENCIA: El intento de login {attempt + 1} falló. Razón: {e}")
+
             if attempt < max_retries - 1:
                 print("    Reintentando...")
                 time.sleep(3) # Pausa antes de reintentar

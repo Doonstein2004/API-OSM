@@ -6,6 +6,8 @@ import psycopg2.extras
 from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
+from utils import login_to_osm
 
 # --- AÑADIDO: Importar las funciones de los scrapers ---
 from scraper_transfers import get_transfers_data
@@ -278,19 +280,39 @@ def sync_league_details(conn, standings_data, squad_values_data, league_id_map, 
 
 def run_full_automation():
     print("🚀 Iniciando la automatización completa de actualización de datos de OSM...")
-    # --- PASO 1: Ejecutar los scrapers ---
-    print("\n[1/5] 🌐 Ejecutando scrapers para obtener datos frescos...")
-    try:
-        fichajes_data = get_transfers_data()
-        standings_data = get_standings_data()
-        squad_values_data = get_squad_values_data()
-        if any("error" in d for d in [fichajes_data, standings_data, squad_values_data]):
-            print("❌ ERROR: Uno de los scrapers falló. Abortando la actualización.")
-            return
-        print("✅ Datos obtenidos con éxito de los scrapers.")
-    except Exception as e:
-        print(f"❌ ERROR CRÍTICO durante la ejecución de los scrapers: {e}")
-        return
+    
+    
+    
+    # Usamos 'with' para asegurarnos de que el navegador siempre se cierre
+    with sync_playwright() as p:
+        try:
+            # 1. Iniciar el navegador UNA SOLA VEZ
+            browser = p.chromium.launch(headless=True) # Usar headless=True en producción
+            page = browser.new_page()
+
+            # 2. Hacer login UNA SOLA VEZ
+            if not login_to_osm(page, max_retries=5):
+                raise Exception("El proceso de login falló después de todos los reintentos.")
+            
+            # 3. Ejecutar los scrapers pasando la misma 'page' logueada
+            print("\n[1/5] 🌐 Ejecutando scrapers de datos dinámicos...")
+            fichajes_data = get_transfers_data(page)
+            standings_data = get_standings_data(page)
+            squad_values_data = get_squad_values_data(page)
+
+            if any("error" in d for d in [fichajes_data, standings_data, squad_values_data]):
+                raise Exception("Uno de los scrapers diarios falló.")
+            
+            print("✅ Datos dinámicos obtenidos con éxito de los scrapers.")
+
+        except Exception as e:
+            print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
+            return # Abortar si el scraping falla
+        finally:
+            # 4. Cerrar el navegador al final del bloque 'with' (se hace automáticamente)
+            print("✅ Fase de scraping completada.")
+            
+            
 
     # --- PASO 2: Conectarse a la base de datos ---
     print("\n[2/5] 🐘 Conectando a la base de datos PostgreSQL...")
