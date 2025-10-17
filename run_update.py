@@ -298,6 +298,14 @@ def run_full_automation():
     if not conn: return
 
     try:
+         # --- NUEVO PASO INICIAL: Resetear el estado de 'is_active' ---
+        print("\n🔄 Reseteando estado de ligas activas...")
+        with conn.cursor() as cur:
+            cur.execute("UPDATE leagues SET is_active = FALSE;")
+            print(f"  - {cur.rowcount} ligas marcadas como inactivas.")
+        conn.commit()
+        # --- FIN DEL NUEVO PASO ---
+        
         # --- PASO 3: Lógica de procesamiento (MODIFICADO) ---
         print("\n[3/5] 🧠 Procesando y resolviendo ligas activas...")
         
@@ -317,17 +325,32 @@ def run_full_automation():
         # --- PASO 4: Sincronización con la Base de Datos (MODIFICADO) ---
         print("\n[4/5] 🔄 Sincronizando datos con PostgreSQL...")
         
-        # --- CAMBIO CLAVE: Ya no necesitamos sincronizar la lista de ligas aquí ---
-        # league_id_map = sync_leagues_with_postgres(conn, filtered_leagues_to_process, all_leagues_data)
-        
-        # Obtenemos el mapa de IDs de las ligas que ya existen en la BD
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM leagues;")
-            league_id_map = {name: league_id for name, league_id in cur.fetchall()}
-            
-        sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map)
+            # El mapa ahora contiene TODAS las ligas de la BD, lo cual es correcto
+            full_league_id_map = {row['name']: row['id'] for row in cur.fetchall()}
+        
+        # Creamos un mapa solo con las ligas activas para las funciones de sync
+        active_league_id_map = {name: full_league_id_map[name] for name in filtered_leagues_to_process if name in full_league_id_map}
+
+        # --- NUEVO PASO: Marcar las ligas resueltas como activas ---
+        if active_league_id_map:
+            with conn.cursor() as cur:
+                active_ids = tuple(active_league_id_map.values())
+                # Usamos %s para el placeholder de la tupla
+                cur.execute(
+                    "UPDATE leagues SET is_active = TRUE, last_scraped_at = %s WHERE id IN %s;",
+                    (datetime.now(), active_ids)
+                )
+                print(f"  - {cur.rowcount} ligas marcadas como activas.")
+            conn.commit()
+        # --- FIN DEL NUEVO PASO ---
+
+        # Ahora pasamos solo el mapa de ligas activas a las funciones de sincronización
+        sync_league_details(conn, standings_data, squad_values_data, active_league_id_map, dashboard_to_official_map)
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
-        upload_data_to_postgres(conn, grouped_transfers, league_id_map)
+        upload_data_to_postgres(conn, grouped_transfers, active_league_id_map)
+
 
         # --- PASO 5: Finalización ---
         print("\n[5/5] ✨ Proceso de sincronización completado con éxito.")
