@@ -15,6 +15,8 @@ def get_squad_values_data(page):
     Extrae la clasificación por valor de equipo para cada liga gestionada.
     """
     try:
+        MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
+        LEAGUE_TABLE_URL = "https://en.onlinesoccermanager.com/League/Standings"
         # --- FASE 2: BUCLE POR CADA SLOT ACTIVO ---
         all_leagues_squad_values = []
         NUM_SLOTS = 4

@@ -13,6 +13,8 @@ def get_transfers_data(page):
     Extrae el historial de transferencias con una robusta lógica de reintentos y esperas inteligentes.
     """
     try:
+        MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
+        TRANSFERS_URL = "https://en.onlinesoccermanager.com/Transferlist"
         all_teams_transfers = []
         NUM_SLOTS = 4
 

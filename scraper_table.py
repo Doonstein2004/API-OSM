@@ -16,7 +16,8 @@ def get_standings_data(page):
     Extrae la tabla de clasificación general para cada liga gestionada.
     """
     try:
-
+        MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
+        LEAGUE_TABLE_URL = "https://en.onlinesoccermanager.com/League/Standings"
         # --- FASE 1: BUCLE POR CADA SLOT ACTIVO ---
         all_leagues_standings = []
         NUM_SLOTS = 4
