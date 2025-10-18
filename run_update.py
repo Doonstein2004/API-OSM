@@ -287,7 +287,7 @@ def run_full_automation():
     with sync_playwright() as p:
         try:
             # 1. Iniciar el navegador y la página UNA SOLA VEZ
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
             context = browser.new_context()
             page = context.new_page()
 
@@ -388,4 +388,5 @@ def run_full_automation():
             print("\n🔌 Conexión con PostgreSQL cerrada.")
 
 if __name__ == "__main__":
+
     run_full_automation()
