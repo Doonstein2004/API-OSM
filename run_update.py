@@ -286,30 +286,41 @@ def run_full_automation():
     # Usamos 'with' para asegurarnos de que el navegador siempre se cierre
     with sync_playwright() as p:
         try:
-            # 1. Iniciar el navegador UNA SOLA VEZ
-            browser = p.chromium.launch(headless=True) # Usar headless=True en producción
-            page = browser.new_page()
+            # 1. Iniciar el navegador y la página UNA SOLA VEZ
+            browser = p.chromium.launch(headless=False)
+            context = browser.new_context()
+            page = context.new_page()
 
-            # 2. Hacer login UNA SOLA VEZ
-            if not login_to_osm(page, max_retries=5):
-                raise Exception("El proceso de login falló después de todos los reintentos.")
+            # 2. ASEGURAR EL LOGIN
+            # Esta es la única puerta de entrada. Si esto falla, el script se detiene.
+            if not login_to_osm(page):
+                raise Exception("El proceso de login falló definitivamente. Abortando.")
             
-            # 3. Ejecutar los scrapers pasando la misma 'page' logueada
-            print("\n[1/5] 🌐 Ejecutando scrapers de datos dinámicos...")
+            # 3. SI EL LOGIN FUE EXITOSO, PROCEDER CON LOS SCRAPERS
+            print("\n[1/5] 🌐 Login exitoso. Ejecutando scrapers de datos dinámicos...")
+            
+            # Pasamos la misma 'page' ya logueada a cada scraper
             fichajes_data = get_transfers_data(page)
             standings_data = get_standings_data(page)
             squad_values_data = get_squad_values_data(page)
 
-            if any("error" in d for d in [fichajes_data, standings_data, squad_values_data]):
-                raise Exception("Uno de los scrapers diarios falló.")
+            if any(d is None or "error" in d for d in [fichajes_data, standings_data, squad_values_data]):
+                raise Exception("Uno de los scrapers diarios falló y devolvió un error.")
             
             print("✅ Datos dinámicos obtenidos con éxito de los scrapers.")
 
         except Exception as e:
             print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
-            return # Abortar si el scraping falla
+            # Guardar el estado final de la página para depurar
+            try:
+                if 'page' in locals() and not page.is_closed():
+                    page.screenshot(path="final_error_screenshot.png")
+                    print("  -> Captura de pantalla del estado final guardada.")
+            except Exception as se:
+                print(f"  -> No se pudo tomar la captura de pantalla final: {se}")
+            return # Abortar la ejecución del script
         finally:
-            # 4. Cerrar el navegador al final del bloque 'with' (se hace automáticamente)
+            # 4. Cerrar el navegador al final. El 'with' lo hace automáticamente.
             print("✅ Fase de scraping completada.")
             
             

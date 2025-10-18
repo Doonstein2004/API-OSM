@@ -1,6 +1,6 @@
-from playwright.sync_api import TimeoutError, Error as PlaywrightError, Page
+from playwright.sync_api import expect, Error as PlaywrightError, Page
 import time
-import os
+import os, re
 
 def handle_popups(page):
     """
@@ -43,89 +43,103 @@ def handle_popups(page):
         
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
-def login_to_osm(page: Page, max_retries: int = 5):
+def login_to_osm(page: Page, max_retries: int = 3):
     """
-    Gestiona el proceso completo de login en OSM, incluyendo la aceptación de cookies
-    y una lógica de reintentos si el login inicial falla.
-    
-    Args:
-        page (Page): La instancia de la página de Playwright.
-        max_retries (int): El número máximo de intentos de login.
+    Proceso de login basado en un bucle de estado, que reacciona a la página actual.
+    """
+    print("Iniciando proceso de login basado en estado...")
+    ACTION_TIMEOUT = 120 * 1000  # 120 segundos
 
-    Returns:
-        bool: True si el login fue exitoso, False en caso contrario.
-    """
-    print("Iniciando proceso de login centralizado...")
-    
     for attempt in range(max_retries):
         try:
-            print(f"Intento de login {attempt + 1}/{max_retries}...")
+            print(f"--- Intento de Login {attempt + 1}/{max_retries} ---")
             
-            # Navegar a la página de inicio (que redirige a la de privacidad/cookies si es necesario)
-            page.goto("https://en.onlinesoccermanager.com/Login", timeout=60000)
+            # Navegamos a la página de entrada una sola vez al principio del intento.
+            page.goto("https://en.onlinesoccermanager.com/Login", timeout=ACTION_TIMEOUT, wait_until="domcontentloaded")
 
-            # 1. Aceptar cookies si el botón aparece
-            accept_button = page.locator('button:has-text("Accept")')
-            if accept_button.count() > 0:
-                print("  - Botón 'Accept' detectado. Aceptando cookies...")
-                accept_button.click()
-                # Esperar a que la página se estabilice después del clic
-                page.wait_for_load_state('domcontentloaded', timeout=40000)
-                
-            try:        
-                # 2 Pasar al login
-                login_link_button = page.locator('button:has-text("Log in")')
-                login_link_button.wait_for(state="visible", timeout=40000)
-                login_link_button.click()
-                
-                
-            except Exception as e:
-                print("No se encontro boton para ir al login")
+            # --- INICIO DEL BUCLE DE ESTADO ---
+            # Este bucle se ejecutará hasta 10 veces para resolver el estado del login.
+            for _ in range(10): # Límite de 10 pasos para evitar bucles infinitos
+                print("Debug")
+                # Espera un poco para que la página se estabilice
+                page.wait_for_timeout(10000) 
+                print("Leão")
+                current_url = page.url
+                print(f"  - Verificando estado. URL actual: {current_url}")
 
-            # 3. Rellenar credenciales
-            print("  - Esperando el formulario de login...")
-            manager_name_input = page.locator("#manager-name")
-            manager_name_input.wait_for(state="visible", timeout=40000)
-            
-            print("  - Rellenando credenciales...")
-            manager_name_input.fill(os.getenv("MI_USUARIO"))
-            page.locator("#password").fill(os.getenv("MI_CONTRASENA"))
-            
-            # 4. Hacer clic en el botón de login
-            print("  - Haciendo clic en el botón de login...")
-            page.locator("#login").click()
-            
-            print("  - Verificando el éxito del login...")
-            page.wait_for_selector(
-                '#crew, a[href="/Career"]', # Espera por #crew O un link al Career dashboard
-                state='visible',
-                timeout=45000
-            )
+                # ESTADO 1: Login Exitoso (Hemos llegado al dashboard)
+                if "Career" in current_url:
+                    print("  - ¡ESTADO: LOGIN EXITOSO! Estamos en el dashboard.")
+                    handle_popups(page)
+                    return True # Salimos de la función con éxito
 
-            # Verificación final: asegurarnos de que no estamos en la página de registro
-            if "/Register" in page.url:
-                raise Exception("Redirigido a la página de registro, el login falló.")
+                # ESTADO 2: En la Página de Aviso de Privacidad
+                elif "PrivacyNotice" in current_url:
+                    print("  - ESTADO: Aviso de Privacidad. Aceptando...")
+                    accept_button = page.get_by_role("button", name="Accept", exact=True)
+                    accept_button.click(timeout=ACTION_TIMEOUT)
+                    # No esperamos navegación aquí, dejamos que el bucle vuelva a comprobar el estado.
+                    continue # Vuelve al inicio del bucle para re-evaluar la nueva página
 
-            print("  - ¡Login exitoso verificado!")
-            handle_popups(page)
-            return True
+                # ESTADO 3: En la Página de Registro
+                elif "Register" in current_url:
+                    print("  - ESTADO: Página de Registro. Navegando a Login...")
+                    go_to_login_button = page.get_by_role("button", name="Log in", exact=True)
+                    go_to_login_button.click(timeout=ACTION_TIMEOUT)
+                    continue # Vuelve al inicio del bucle para re-evaluar la nueva página
+
+                # ESTADO 4: En la Página de Login (Nuestro objetivo intermedio)
+                elif "/Login" in current_url:
+                    print("  - ESTADO: Página de Login. Rellenando formulario...")
+                    username_input = page.locator("#manager-name")
+                    
+                    # Verificamos si el formulario ya está visible
+                    if not username_input.is_visible():
+                        print("    - Formulario no visible, esperando...")
+                        page.wait_for_selector("#manager-name", state="visible", timeout=ACTION_TIMEOUT)
+
+                    usuario = os.getenv("MI_USUARIO")
+                    contrasena = os.getenv("MI_CONTRASENA")
+                    if not usuario or not contrasena:
+                        raise Exception("Credenciales no encontradas.")
+
+                    username_input.fill(usuario)
+                    page.locator("#password").fill(contrasena)
+                    
+                    login_button = page.locator("#login")
+                    print("  - Enviando formulario...")
+                    login_button.click(timeout=ACTION_TIMEOUT)
+                    print("Que pasa")
+                    continue # Vuelve al inicio del bucle para re-evaluar la nueva página
+
+                # ESTADO DESCONOCIDO: Si no estamos en ninguna de las páginas esperadas
+                else:
+                    print(f"  - ESTADO DESCONOCIDO. Refrescando la página...")
+                    page.reload(wait_until="domcontentloaded")
+                    continue
+
+            # Si salimos del bucle de 10 pasos sin éxito, el intento falla.
+            raise Exception("El flujo de login no se pudo resolver después de 10 pasos.")
 
         except Exception as e:
-            print(f"  - ADVERTENCIA: El intento de login {attempt + 1} falló. Razón: {e}")
+            # ... (la lógica de error y reintento no cambia)
+            print(f"  - ADVERTENCIA: El intento {attempt + 1} falló.")
+            error_type = type(e).__name__
+            error_message = str(e).split('\n')[0]
+            print(f"    - Razón: {error_type} - {error_message}")
+            try:
+                page.screenshot(path=f"login_error_attempt_{attempt + 1}.png")
+                print(f"    - Captura de pantalla guardada.")
+            except Exception as se:
+                print(f"    - No se pudo tomar la captura de pantalla: {se}")
 
             if attempt < max_retries - 1:
-                print("    Reintentando...")
-                time.sleep(3) # Pausa antes de reintentar
+                print("    Reintentando en 10 segundos...")
+                time.sleep(10)
             else:
                 print("  - ERROR: Se alcanzó el número máximo de reintentos de login.")
                 return False
-        except Exception as e:
-            print(f"  - ERROR INESPERADO durante el intento de login {attempt + 1}: {e}")
-            if attempt < max_retries - 1:
-                print("    Reintentando...")
-                time.sleep(3)
-            else:
-                print("  - ERROR: Se alcanzó el número máximo de reintentos debido a un error inesperado.")
-                return False
     
     return False
+
+
