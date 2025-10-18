@@ -8,6 +8,8 @@ import psycopg2
 import psycopg2.extras
 from dotenv import load_dotenv
 from scraper_leagues import get_data_from_website
+from playwright.sync_api import sync_playwright
+from utils import login_to_osm
 
 # --- Cargar configuración ---
 load_dotenv()
@@ -70,20 +72,36 @@ def main():
     conn = get_db_connection()
     if not conn:
         exit(1)
-    
-    try:
-        all_leagues_data = get_data_from_website()
-        if "error" in all_leagues_data:
-            print("❌ ERROR: El scraper de ligas falló.")
-            return
         
-        sync_all_leagues(conn, all_leagues_data)
-        print("\n✨ Lista maestra de ligas actualizada en la base de datos.")
+    with sync_playwright() as p:
+        try:
+            # 1. Iniciar el navegador UNA SOLA VEZ
+            browser = p.chromium.launch(headless=False) # Usar headless=True en producción
+            page = browser.new_page()
+
+            # 2. Hacer login UNA SOLA VEZ
+            if not login_to_osm(page, max_retries=5):
+                raise Exception("El proceso de login falló después de todos los reintentos.")
+        except Exception as e:
+            print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
+            return # Abortar si el scraping falla
     
-    finally:
-        if conn:
-            conn.close()
-            print("\n🔌 Conexión con PostgreSQL cerrada.")
+        try:
+            all_leagues_data = get_data_from_website(page)
+            if "error" in all_leagues_data:
+                print("❌ ERROR: El scraper de ligas falló.")
+                return
+            
+            sync_all_leagues(conn, all_leagues_data)
+            print("\n✨ Lista maestra de ligas actualizada en la base de datos.")
+        except Exception as e:
+            print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
+            return # Abortar si el scraping falla
+    
+        finally:
+            if conn:
+                conn.close()
+                print("\n🔌 Conexión con PostgreSQL cerrada.")
 
 if __name__ == "__main__":
     main()
