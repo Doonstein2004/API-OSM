@@ -76,7 +76,7 @@ def main():
     with sync_playwright() as p:
         try:
             # 1. Iniciar el navegador UNA SOLA VEZ
-            browser = p.chromium.launch(headless=False) # Usar headless=True en producción
+            browser = p.chromium.launch(headless=True) # Usar headless=True en producción
             page = browser.new_page()
 
             # 2. Hacer login UNA SOLA VEZ
