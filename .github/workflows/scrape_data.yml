@@ -50,23 +50,31 @@ jobs:
       - name: Run scraping script
         run: python run_update.py
         # Pasa los secretos de GitHub a las variables de entorno del script
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          MI_USUARIO: ${{ secrets.MI_USUARIO }}
+          MI_CONTRASENA: ${{ secrets.MI_CONTRASENA }}
 
       - name: Send Discord Notification on Success
         if: success()
         uses: tsickert/discord-webhook@v5.3.0
-                with:
-                  webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
-                  content: "✅ **Scraper Diario de OSM completado con éxito!**"
-                  username: "OSM Bot"
-                  embeds: |
-                    [
-                      {
-                        "title": "Ver Ejecución en GitHub",
-                        "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-                        "color": 65280,
-                        "timestamp": "${{ toJSON(github.event.head_commit.timestamp) }}"
-                      }
-                    ]
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          content: "✅ **Scraper Diario de OSM completado con éxito!**"
+          username: "OSM Bot"
+          embeds: |
+            [
+              {
+                "title": "Ver Ejecución en GitHub",
+                "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+                "color": 65280,
+                "timestamp": "${{ toJSON(github.event.head_commit.timestamp) }}"
+              }
+            ]
 
       # Este paso SIEMPRE se ejecuta, pero solo si el job falló.
       - name: Send Discord Notification on Failure
@@ -86,11 +94,3 @@ jobs:
                 "timestamp": "${{ toJSON(github.event.head_commit.timestamp) }}"
               }
             ]
-        env:
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_PORT: ${{ secrets.DB_PORT }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          MI_USUARIO: ${{ secrets.MI_USUARIO }}
-          MI_CONTRASENA: ${{ secrets.MI_CONTRASENA }}
