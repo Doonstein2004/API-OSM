@@ -167,21 +167,57 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
     return dict(grouped_transfers)
 
 def upload_data_to_postgres(conn, grouped_transfers, league_id_map):
+    # Ya no borramos todo. En su lugar, insertamos de forma incremental.
+    print("\n🔄 Sincronizando fichajes de forma inteligente...")
+    
     with conn.cursor() as cur:
+        total_new_transfers = 0
         for league_name, transfers in grouped_transfers.items():
             if league_name in LEAGUES_TO_IGNORE:
-                print(f"\n🚫 Omitiendo subida para la liga ignorada: '{league_name}'")
                 continue
+            
             league_id = league_id_map.get(league_name)
             if not league_id: continue
-            print(f"\n🔄 Actualizando fichajes para '{league_name}' (ID: {league_id})...")
-            cur.execute("DELETE FROM transfers WHERE league_id = %s;", (league_id,))
-            print(f"  - {cur.rowcount} fichajes antiguos eliminados.")
-            if transfers:
-                sql = "INSERT INTO transfers (league_id, player_name, manager_name, transaction_type, position, round, base_value, final_price, created_at) VALUES %s;"
-                data_tuples = [(league_id, t['playerName'], t['managerName'], t['transactionType'], t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt']) for t in transfers]
-                psycopg2.extras.execute_values(cur, sql, data_tuples)
-                print(f"  - {len(transfers)} nuevos fichajes subidos.")
+            
+            new_transfers_in_league = 0
+            
+            # --- INICIO DE LA LÓGICA INTELIGENTE ---
+            # Preparamos la sentencia SQL con la cláusula ON CONFLICT
+            sql = """
+                INSERT INTO transfers (
+                    league_id, player_name, manager_name, transaction_type, 
+                    position, round, base_value, final_price, created_at
+                ) VALUES (
+                    %(league_id)s, %(playerName)s, %(managerName)s, %(transactionType)s, 
+                    %(position)s, %(round)s, %(baseValue)s, %(finalPrice)s, %(createdAt)s
+                )
+                ON CONFLICT (league_id, round, player_name, manager_name, final_price)
+                DO NOTHING;
+            """
+            
+            # Iteramos sobre cada fichaje scrapeado
+            for t in transfers:
+                # Añadimos el league_id a cada diccionario de fichaje
+                t_with_id = {**t, "league_id": league_id}
+                
+                # Ejecutamos la inserción para este fichaje
+                cur.execute(sql, t_with_id)
+                
+                # 'cur.rowcount' será 1 si la inserción fue exitosa (el fichaje era nuevo)
+                # y 0 si hubo un conflicto (el fichaje ya existía y no se hizo nada).
+                if cur.rowcount > 0:
+                    new_transfers_in_league += 1
+            # --- FIN DE LA LÓGICA INTELIGENTE ---
+            
+            if new_transfers_in_league > 0:
+                print(f"  - Liga '{league_name}': {new_transfers_in_league} nuevos fichajes insertados.")
+                total_new_transfers += new_transfers_in_league
+
+    if total_new_transfers == 0:
+        print("  - No se encontraron nuevos fichajes en ninguna liga.")
+    else:
+        print(f"\n✅ Total de {total_new_transfers} nuevos fichajes insertados en la base de datos.")
+
     conn.commit()
 
 # --- NUEVA FUNCIÓN ---

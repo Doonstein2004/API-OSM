@@ -3,7 +3,7 @@ import os
 import time
 import json
 from dotenv import load_dotenv
-from playwright.sync_api import TimeoutError, Error as PlaywrightError
+from playwright.sync_api import TimeoutError, expect, Error as PlaywrightError
 from utils import handle_popups
 
 load_dotenv()
@@ -12,19 +12,22 @@ def get_transfers_data(page):
     """
     Extrae el historial de transferencias con una robusta lógica de reintentos y esperas inteligentes.
     """
+    MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
+    TRANSFERS_URL = "https://en.onlinesoccermanager.com/Transferlist"
+    
     try:
-        MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
-        TRANSFERS_URL = "https://en.onlinesoccermanager.com/Transferlist"
         all_teams_transfers = []
         NUM_SLOTS = 4
 
         for i in range(NUM_SLOTS):
             print(f"\n--- Analizando Slot de Equipo #{i + 1} ---")
             
-            # Reseteamos al estado inicial en cada iteración del bucle principal
-            if page.url != MAIN_DASHBOARD_URL:
-                page.goto(MAIN_DASHBOARD_URL)
-            page.wait_for_selector(".career-teamslot", timeout=40000)
+            # Navegar al dashboard principal para empezar limpio en cada iteración
+            if not page.url.endswith("/Career"):
+                page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded")
+
+            # Esperar a que los slots sean visibles
+            page.locator(".career-teamslot").first.wait_for(state="visible", timeout=60000)
 
             slot = page.locator(".career-teamslot").nth(i)
 
@@ -40,37 +43,55 @@ def get_transfers_data(page):
                 try:
                     print(f"Procesando equipo: {team_name} (Intento {attempt + 1}/{MAX_RETRIES})")
                     
-                    # Es crucial volver a localizar el slot en cada reintento
-                    page.locator(".career-teamslot").nth(i).click()
-                    page.wait_for_selector("#timers", timeout=40000)
+                    # --- INICIO DE LA CORRECCIÓN ---
+                    # 1. Hacemos clic en el slot y esperamos a que la nueva página cargue,
+                    #    sin importar cuál sea la URL de destino.
+                    with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
+                        page.locator(".career-teamslot").nth(i).click()
+                    
+                    print(f"  - Clic en slot realizado. Aterrizaje en: {page.url}")
+                    handle_popups(page)
+
+                    # 2. AHORA, en lugar de verificar la URL, vamos directamente
+                    #    a la página que nos interesa (la de transferencias).
+                    #    Como ya estamos "dentro" del club, esta navegación funcionará.
+                    print(f"  - Navegando directamente a {TRANSFERS_URL}...")
+                    page.goto(TRANSFERS_URL, wait_until="domcontentloaded", timeout=60000)
                     handle_popups(page)
                     
-                    page.goto(TRANSFERS_URL)
-                    
-                    time.sleep(10)
-                    
-                    # --- INICIO DE LA CORRECCIÓN LÓGICA ---
-                    print("  - Navegando al historial de transferencias...")
                     page.locator("a[href='#transfer-history']").click()
                     
-                    # ESPERA INTELIGENTE: Esperamos a que la primera fila de la tabla sea visible.
-                    # Esto confirma que el JS ha renderizado el contenido inicial.
-                    page.wait_for_selector("#transfer-history table.table tbody tr", timeout=15000)
+                    # Esperar a que la tabla sea visible
+                    history_table = page.locator("#transfer-history table.table")
+                    expect(history_table).to_be_visible(timeout=30000)
                     print("  - Contenido inicial del historial visible.")
-                    # --- FIN DE LA CORRECCIÓN ---
 
+                    # --- INICIO DE LA LÓGICA DE CARGA MEJORADA ---
                     print("  - Cargando todos los registros...")
-                    while page.locator('button:has-text("More transfers")').is_visible(timeout=5000): # Timeout más corto aquí es seguro
-                        old_count = page.locator("#transfer-history table.table tbody tr").count()
-                        page.locator('button:has-text("More transfers")').click()
-                        # Esperamos a que el número de filas aumente, confirmando la carga
-                        page.wait_for_function(
-                            f"document.querySelectorAll('#transfer-history table.table tbody tr').length > {old_count}",
-                            timeout=10000
-                        )
-                        time.sleep(2)
-                    print("  - Todos los registros cargados.")
+                    more_button = page.locator('button:has-text("More transfers")')
+                    
+                    while more_button.is_visible(timeout=5000):
+                        old_row_count = history_table.locator("tbody tr").count()
+                        more_button.click()
+                        
+                        # Bucle de espera manual
+                        # Intentaremos hasta 10 veces (20 segundos en total) a que las filas aumenten
+                        wait_success = False
+                        for _ in range(10): # 10 reintentos
+                            time.sleep(2) # Espera 2 segundos entre cada comprobación
+                            new_row_count = history_table.locator("tbody tr").count()
+                            if new_row_count > old_row_count:
+                                print(f"    - Cargadas {new_row_count - old_row_count} filas más (Total: {new_row_count})")
+                                wait_success = True
+                                break # Salir del bucle de espera si las filas aumentaron
+                        
+                        if not wait_success:
+                            print("    - El botón 'More transfers' fue presionado pero no cargó más filas después de 20 segundos. Asumiendo que se ha cargado todo.")
+                            break # Salir del bucle principal 'while'
 
+                    print("  - Todos los registros cargados.")
+                    # --- FIN DE LA LÓGICA DE CARGA MEJORADA ---
+                    
                     print("  - Extrayendo datos de la tabla (modo optimizado)...")
                     transfers_list = page.evaluate("""
                         () => {
