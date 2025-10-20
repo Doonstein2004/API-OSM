@@ -21,3 +21,11 @@ pyvenv.cfg
 # Archivos de IDE/Editor
 .vscode/
 .idea/
+
+# Archivos de Imagenes
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.ico
