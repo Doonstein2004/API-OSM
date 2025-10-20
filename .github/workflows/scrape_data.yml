@@ -63,34 +63,23 @@ jobs:
         if: success()
         uses: tsickert/discord-webhook@v5.3.0
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # CORRECCIÓN: Usar 'webhook-url' en lugar de 'webhook'
+          webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
           content: "✅ **Scraper Diario de OSM completado con éxito!**"
-          username: "OSM Bot"
-          embeds: |
-            [
-              {
-                "title": "Ver Ejecución en GitHub",
-                "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-                "color": 65280,
-                "timestamp": "${{ toJSON(github.event.head_commit.timestamp) }}"
-              }
-            ]
+          # CORRECCIÓN: Usar parámetros individuales para el embed
+          embed-title: "Ver Ejecución en GitHub"
+          embed-url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          embed-color: 65280 # Verde
 
-      # Este paso SIEMPRE se ejecuta, pero solo si el job falló.
       - name: Send Discord Notification on Failure
         if: failure()
         uses: tsickert/discord-webhook@v5.3.0
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          # CORRECCIÓN: Usar 'webhook-url'
+          webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
           content: "❌ **ERROR: El Scraper Diario de OSM falló!**"
-          username: "OSM Bot"
-          embeds: |
-            [
-              {
-                "title": "Ver Logs del Error en GitHub",
-                "description": "El proceso de scraping no se completó. Por favor, revisa los logs para más detalles.",
-                "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
-                "color": 16711680,
-                "timestamp": "${{ toJSON(github.event.head_commit.timestamp) }}"
-              }
-            ]
+          # CORRECCIÓN: Usar parámetros individuales
+          embed-title: "Ver Logs del Error en GitHub"
+          embed-description: "El proceso de scraping no se completó. Por favor, revisa los logs."
+          embed-url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          embed-color: 16711680 # Rojo
