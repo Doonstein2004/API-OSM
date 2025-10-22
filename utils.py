@@ -80,6 +80,12 @@ def login_to_osm(page: Page, max_retries: int = 3):
                     accept_button.click(timeout=ACTION_TIMEOUT)
                     # No esperamos navegación aquí, dejamos que el bucle vuelva a comprobar el estado.
                     continue # Vuelve al inicio del bucle para re-evaluar la nueva página
+                
+                elif "ChooseLeague" in current_url:
+                    print("  - ESTADO: LOGIN EXITOSO! Estamos en la seleccion de ligas... Redirigiendo a Career.")
+                    page.goto("https://en.onlinesoccermanager.com/Career", timeout=ACTION_TIMEOUT, wait_until="domcontentloaded")
+                    # No esperamos navegación aquí, dejamos que el bucle vuelva a comprobar el estado.
+                    return True # Salimos de la función con éxito
 
                 # ESTADO 3: En la Página de Registro
                 elif "Register" in current_url:
