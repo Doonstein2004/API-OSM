@@ -62,7 +62,7 @@ def get_standings_data(page):
                 
                 for row in rows.all():
                     position = row.locator("td.td-ranking").inner_text()
-                    club_name = row.locator("td:nth-child(2) span.ellipsis").inner_text()
+                    club_name = row.locator("span.ellipsis").inner_text()
                     manager_name_locator = row.locator("span.text-italic")
                     manager_name = manager_name_locator.inner_text() if manager_name_locator.count() > 0 else "N/A"
                     played = row.locator("td").nth(4).inner_text()

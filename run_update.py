@@ -11,8 +11,7 @@ from utils import login_to_osm
 
 # --- AÑADIDO: Importar las funciones de los scrapers ---
 from scraper_transfers import get_transfers_data
-from scraper_values import get_squad_values_data
-from scraper_table import get_standings_data
+from scraper_league_details import get_league_data
 
 # --- CONFIGURACIÓN ---
 load_dotenv()
@@ -337,8 +336,7 @@ def run_full_automation():
             
             # Pasamos la misma 'page' ya logueada a cada scraper
             fichajes_data = get_transfers_data(page)
-            standings_data = get_standings_data(page)
-            squad_values_data = get_squad_values_data(page)
+            standings_data, squad_values_data = get_league_data(page)
 
             if any(d is None or "error" in d for d in [fichajes_data, standings_data, squad_values_data]):
                 raise Exception("Uno de los scrapers diarios falló y devolvió un error.")
