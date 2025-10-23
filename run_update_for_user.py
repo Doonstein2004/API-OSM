@@ -221,11 +221,11 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
     conn.commit()
 
 # --- NUEVA FUNCIÓN ---
-def get_leagues_for_mapping(conn, user_id):
+def get_leagues_for_mapping(conn):
     """Obtiene los datos de las ligas desde la BD en el formato que create_league_maps necesita."""
     print("  - Obteniendo lista de ligas desde la base de datos para el mapeo...")
     with conn.cursor() as cur:
-        cur.execute("SELECT name AS league_name, teams FROM leagues WHERE user_id = %s;", (user_id,))
+        cur.execute("SELECT name AS league_name, teams FROM leagues;")
         
         results = []
         for row in cur.fetchall():
@@ -262,53 +262,69 @@ def get_all_leagues_from_db(cursor):
     return {row['id']: dict(row) for row in cursor.fetchall()}
 
 def sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map, user_id):
-    print("\n🔄 Sincronizando Mánagers, Valores y Clasificaciones...")
+    print("\n🔄 Sincronizando detalles de ligas del usuario en 'user_leagues'...")
     with conn.cursor() as cur:
-
-        # 1. Iteramos solo sobre las ligas activas que nos interesan. ¡Esto es correcto!
+        # Iteramos solo sobre las ligas activas que acabamos de resolver para este usuario
         for official_name, league_id in league_id_map.items():
             if official_name in LEAGUES_TO_IGNORE: 
-                continue # Saltamos las ligas ignoradas
+                continue
 
-            managersByTeam, current_values, standings = {}, {}, []
+            # Inicializamos los datos específicos de esta liga para este usuario
+            managersByTeam, standings, squad_values = {}, [], []
+            
             dashboard_name = next((dn for dn, on in dashboard_to_official_map.items() if on == official_name), None)
             
-            # 2. La lógica para obtener los nuevos datos es correcta.
             if dashboard_name:
+                # Extraer datos de la clasificación
                 league_standings_data = next((ls for ls in standings_data if ls.get("league_name") == dashboard_name), None)
                 if league_standings_data:
                     standings = league_standings_data.get("standings", [])
+                    # Extraer el mapeo de managers desde la clasificación
                     for team in standings:
                         if team.get("Manager") and team.get("Manager") != "N/A": 
                             managersByTeam[team["Club"]] = team["Manager"]
                             
+                # Extraer datos de los valores de equipo
                 league_values_data = next((lv for lv in squad_values_data if lv.get("league_name") == dashboard_name), None)
                 if league_values_data:
-                    for team in league_values_data.get("squad_values_ranking", []): 
-                        current_values[team["Club"]] = parse_value_string(team["Value"])
+                    squad_values = league_values_data.get("squad_values_ranking", [])
 
-            # --- INICIO DE LA CORRECCIÓN ---
-            # 3. Necesitamos obtener la lista de equipos ACTUAL de la BD para esta liga específica.
-            cur.execute("SELECT teams FROM leagues WHERE id = %s;", (league_id,))
-            result = cur.fetchone()
+            # --- LÓGICA DE ESCRITURA EN 'user_leagues' ---
+            # Usamos una sentencia de UPSERT (INSERT ... ON CONFLICT DO UPDATE).
+            # Si la combinación (user_id, league_id) ya existe, actualiza los datos.
+            # Si no existe, inserta una nueva fila.
+            sql = """
+                INSERT INTO public.user_leagues (
+                    user_id, 
+                    league_id, 
+                    standings, 
+                    squad_values, 
+                    managers_by_team
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, league_id) DO UPDATE SET
+                    standings = EXCLUDED.standings,
+                    squad_values = EXCLUDED.squad_values,
+                    managers_by_team = EXCLUDED.managers_by_team;
+            """
             
-            # Nos aseguramos de que el resultado no sea nulo y que la columna 'teams' tampoco lo sea.
-            updated_teams = result['teams'] if result and 'teams' in result else []
-            if updated_teams is None:
-                updated_teams = []
-            # --- FIN DE LA CORRECCIÓN ---
-
-            # 4. Actualizamos la lista de equipos con los nuevos valores. ¡Esto es correcto!
-            for team_obj in updated_teams:
-                if team_obj.get("name") in current_values: 
-                    team_obj["currentValue"] = current_values[team_obj.get("name")]
-
-            # 5. Ejecutamos el UPDATE final para esta liga. ¡Esto es correcto!
-            sql = "UPDATE leagues SET managers_by_team = %s, teams = %s, standings = %s WHERE id = %s AND user_id = %s;"
-            cur.execute(sql, (json.dumps(managersByTeam), json.dumps(updated_teams), json.dumps(standings), league_id, user_id))
-            print(f"  - Detalles actualizados para '{official_name}'.")
-            
+            # Ejecutamos la consulta con los datos de esta liga para este usuario
+            try:
+                cur.execute(sql, (
+                    user_id, 
+                    league_id, 
+                    json.dumps(standings), 
+                    json.dumps(squad_values), 
+                    json.dumps(managersByTeam)
+                ))
+                print(f"  - Detalles de la liga '{official_name}' sincronizados para el usuario.")
+            except Exception as e:
+                print(f"  - ❌ ERROR al sincronizar detalles para '{official_name}': {e}")
+                # Opcional: podrías decidir hacer rollback de la transacción aquí si un error es crítico
+                # conn.rollback()
+                
     conn.commit()
+
 
 
 def get_osm_credentials(conn, user_id):
@@ -331,7 +347,7 @@ def get_osm_credentials(conn, user_id):
 def run_update_for_user(user_id):
     print(f"🚀 Iniciando actualización a demanda para el usuario: {user_id}")
     
-    # --- FASE 1: OBTENER CREDENCIALES ---
+    # --- FASE 1: OBTENER CREDENCIALES (Conexión corta) ---
     conn = get_db_connection()
     if not conn: return
     try:
@@ -342,62 +358,75 @@ def run_update_for_user(user_id):
     finally:
         if conn: conn.close()
 
-    # --- FASE 2: SCRAPING (TAREA LARGA) ---
+    # --- FASE 2: SCRAPING (Tarea larga, sin conexión a BD) ---
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             if not login_to_osm(page, osm_username, osm_password):
                 raise Exception("El proceso de login falló.")
+
             print("\n[1/3] 🌐 Login exitoso. Ejecutando scrapers...")
             fichajes_data = get_transfers_data(page)
-            # Asumiendo que get_league_data devuelve ambos valores
             standings_data, squad_values_data = get_league_data(page)
             print("✅ Datos dinámicos obtenidos con éxito.")
     except Exception as e:
         print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
         return
 
-    # --- FASE 3: SINCRONIZACIÓN CON LA BASE DE DATOS ---
+    # --- FASE 3: SINCRONIZACIÓN CON BD (Conexión larga) ---
     print("\n[2/3] 🐘 Conectando a la base de datos para sincronizar...")
     conn = get_db_connection()
     if not conn: return
     
     try:
         print("\n[3/3] 🧠 Procesando y sincronizando datos...")
-    
-        with conn.cursor() as cur:
-            print("  - Reseteando estado de ligas activas para este usuario...")
-            cur.execute("UPDATE leagues SET is_active = FALSE WHERE user_id = %s;", (user_id,))
-        conn.commit()
 
-        all_leagues_data_from_db = get_leagues_for_mapping(conn, user_id)
+        # 1. Leer la lista maestra de ligas (global, sin filtro de usuario)
+        all_leagues_data_from_db = get_leagues_for_mapping(conn) # Asegúrate que esta función no filtra por user_id
+        
+        # 2. Procesar datos para resolver ligas activas
         team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data_from_db)
         dashboard_to_official_map = create_dashboard_to_official_league_map(standings_data, team_to_resolved_league)
         official_leagues_from_transfers = set(team_to_resolved_league.values())
         filtered_leagues_to_process = {name for name in official_leagues_from_transfers if name not in LEAGUES_TO_IGNORE}
-
+        
         if not filtered_leagues_to_process:
             print("ℹ️ No se encontraron ligas con fichajes para procesar. Finalizando.")
             return
 
         print(f"  - Ligas activas encontradas: {list(filtered_leagues_to_process)}")
-        print("\n  - Sincronizando datos con PostgreSQL...")
 
+        # 3. Obtener el mapa de IDs de la tabla global 'leagues'
         with conn.cursor() as cur:
-            cur.execute("SELECT id, name FROM leagues WHERE user_id = %s;", (user_id,))
+            cur.execute("SELECT id, name FROM leagues;")
             full_league_id_map = {row['name']: row['id'] for row in cur.fetchall()}
-
+        
         active_league_id_map = { name: full_league_id_map[name] for name in filtered_leagues_to_process if name in full_league_id_map }
-
+        
+        # 4. Actualizar el estado 'is_active' en la tabla de relación 'user_leagues'
         if active_league_id_map:
             with conn.cursor() as cur:
+                # Primero, poner todas las ligas de ESTE USUARIO como inactivas
+                cur.execute("UPDATE public.user_leagues SET is_active = FALSE WHERE user_id = %s;", (user_id,))
+                print(f"  - Reseteado el estado activo para el usuario.")
+
+                # Luego, usar UPSERT para marcar las nuevas como activas (o crearlas si no existen)
                 active_ids = tuple(active_league_id_map.values())
-                query = "UPDATE leagues SET is_active = TRUE, last_scraped_at = %s WHERE id = ANY(%s) AND user_id = %s;"
-                cur.execute(query, (datetime.now(), list(active_ids), user_id))
-                print(f"  - {cur.rowcount} ligas marcadas como activas.")
+                now = datetime.now()
+                sql_activate = """
+                    INSERT INTO public.user_leagues (user_id, league_id, is_active, last_scraped_at)
+                    VALUES (%s, %s, TRUE, %s)
+                    ON CONFLICT (user_id, league_id) DO UPDATE SET
+                        is_active = TRUE,
+                        last_scraped_at = EXCLUDED.last_scraped_at;
+                """
+                for league_id in active_ids:
+                    cur.execute(sql_activate, (user_id, league_id, now))
+                print(f"  - {len(active_ids)} ligas marcadas/creadas como activas para el usuario.")
             conn.commit()
             
+        # 5. Sincronizar el resto de los datos
         sync_league_details(conn, standings_data, squad_values_data, active_league_id_map, dashboard_to_official_map, user_id)
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
         upload_data_to_postgres(conn, grouped_transfers, active_league_id_map, user_id)
