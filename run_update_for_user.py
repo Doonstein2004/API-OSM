@@ -73,63 +73,56 @@ def create_league_maps(all_leagues_data):
     return dict(team_to_leagues), dict(league_to_teams)
 
 
-def resolve_active_leagues(my_fichajes, all_leagues_data, standings_data):
-    """
-    Resuelve ambigüedades comparando la composición de equipos de la liga actual
-    con las definiciones de las ligas maestras.
-    """
-    my_managed_teams = {team['team_name']: team for team in my_fichajes}
-    team_to_leagues, league_to_teams_master = create_league_maps(all_leagues_data)
+def resolve_active_leagues(my_fichajes, all_leagues_data, league_details_data):
+    """Resuelve ambigüedades usando ÚNICAMENTE la composición de equipos."""
+    print("\n[3.1] 🧠 Resolviendo ligas activas...")
+    
+    my_managed_teams = {team['team_name'] for team in my_fichajes}
+    team_to_leagues_master, league_to_teams_master = create_league_maps(all_leagues_data)
     resolved_map = {}
 
-    # --- NUEVO: Crear un mapa de los competidores actuales para cada equipo gestionado ---
     current_competitors_map = defaultdict(set)
-    for league_info in standings_data:
+    dashboard_to_team_map = {}
+    for league_info in league_details_data:
         managed_team_name = league_info.get("team_name")
+        dashboard_name = league_info.get("league_name")
         if managed_team_name in my_managed_teams:
+            dashboard_to_team_map[dashboard_name] = managed_team_name
             current_competitors = {normalize_team_name(team['Club']) for team in league_info.get("standings", [])}
             current_competitors_map[managed_team_name] = current_competitors
 
-    for original_name, team_data in my_managed_teams.items():
+    for original_name in my_managed_teams:
         normalized_name = normalize_team_name(original_name)
-        candidate_leagues = team_to_leagues.get(normalized_name, [])
+        candidate_leagues = team_to_leagues_master.get(normalized_name, [])
 
         if len(candidate_leagues) == 1:
             resolved_map[original_name] = candidate_leagues[0]
-            print(f"  - Equipo '{original_name}' asignado unívocamente a la liga '{candidate_leagues[0]}'.")
-        
+            print(f"  - Equipo '{original_name}' asignado a '{candidate_leagues[0]}'.")
         elif len(candidate_leagues) > 1:
-            print(f"  - Ambigüedad para '{original_name}'. Candidatas: {candidate_leagues}. Analizando composición de equipos...")
-            
-            # Obtener la lista de equipos contra los que compite AHORA
+            print(f"  - Ambigüedad para '{original_name}'. Candidatas: {candidate_leagues}. Usando composición de equipos...")
             current_competitors = current_competitors_map.get(original_name)
             if not current_competitors:
-                print(f"  - ADVERTENCIA: No se encontraron datos de clasificación actuales para '{original_name}'. No se puede resolver la ambigüedad.")
+                print(f"  - ADVERTENCIA: No se encontraron datos de clasificación para '{original_name}'.")
                 continue
 
-            league_scores = {}
-            for league_name in candidate_leagues:
-                # Obtener la lista de equipos de la definición maestra de esta liga candidata
-                master_team_set = league_to_teams_master.get(league_name, set())
-                
-                # Calcular cuántos equipos hay en común
-                intersection_size = len(current_competitors.intersection(master_team_set))
-                league_scores[league_name] = intersection_size
-
-            print(f"  - Puntuaciones de coincidencia de equipos: {league_scores}")
-
-            if not any(league_scores.values()):
-                 print(f"  - ADVERTENCIA: No se encontró ninguna coincidencia de equipos para '{original_name}'.")
-                 continue
+            scores = {name: len(current_competitors.intersection(league_to_teams_master.get(name, set()))) for name in candidate_leagues}
+            print(f"  - Puntuaciones de coincidencia: {scores}")
             
-            winner_league = max(league_scores, key=league_scores.get)
-            resolved_map[original_name] = winner_league
-            print(f"  - Análisis completado. '{original_name}' asignado a '{winner_league}' por mayor coincidencia de equipos.")
-        
+            winner = max(scores, key=scores.get)
+            resolved_map[original_name] = winner
+            print(f"  - Ganador: '{winner}' con {scores[winner]} coincidencias.")
         else:
-            print(f"  - ADVERTENCIA: El equipo '{original_name}' no se encontró en la lista maestra de ligas.")
+            print(f"  - ADVERTENCIA: Equipo '{original_name}' no encontrado en la lista maestra.")
     
-    return resolved_map
+    # Crear el mapa de dashboard a oficial AHORA, que es más fiable
+    dashboard_map = {}
+    for dash_name, team_name in dashboard_to_team_map.items():
+        if team_name in resolved_map:
+            dashboard_map[dash_name] = resolved_map[team_name]
+
+    print(f"\n[3.2] 🗺️ Mapa de Dashboard a Oficial creado: {dashboard_map}")
+    return resolved_map, dashboard_map
+
 
 
 def create_dashboard_to_official_league_map(standings_data, team_to_resolved_league):
@@ -416,8 +409,12 @@ def run_update_for_user(user_id):
         all_leagues_data_from_db = get_leagues_for_mapping(conn) # Asegúrate que esta función no filtra por user_id
         
         # 2. Procesar datos para resolver ligas activas
-        team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data_from_db, standings_data)
-        dashboard_to_official_map = create_dashboard_to_official_league_map(standings_data, team_to_resolved_league)
+        team_to_resolved_league, dashboard_to_official_map = resolve_active_leagues(
+            fichajes_data, 
+            all_leagues_data_from_db, 
+            standings_data  # Usamos standings_data para la resolución
+        )
+
         official_leagues_from_transfers = set(team_to_resolved_league.values())
         filtered_leagues_to_process = {name for name in official_leagues_from_transfers if name not in LEAGUES_TO_IGNORE}
         

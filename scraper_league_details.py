@@ -127,11 +127,13 @@ def get_league_data(page):
                 
                 # === PARTE 3: AGREGAR A LAS LISTAS SEPARADAS (FORMATO ORIGINAL) ===
                 all_leagues_standings.append({
+                    "team_name": team_name,
                     "league_name": league_name,
                     "standings": standings_list
                 })
                 
                 all_leagues_squad_values.append({
+                    "team_name": team_name,
                     "league_name": league_name,
                     "squad_values_ranking": squad_values_list
                 })
