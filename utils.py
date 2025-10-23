@@ -43,7 +43,7 @@ def handle_popups(page):
         
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
-def login_to_osm(page: Page, max_retries: int = 3):
+def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: int = 3):
     """
     Proceso de login basado en un bucle de estado, que reacciona a la página actual.
     """
@@ -104,13 +104,13 @@ def login_to_osm(page: Page, max_retries: int = 3):
                         print("    - Formulario no visible, esperando...")
                         page.wait_for_selector("#manager-name", state="visible", timeout=ACTION_TIMEOUT)
 
-                    usuario = os.getenv("MI_USUARIO")
-                    contrasena = os.getenv("MI_CONTRASENA")
-                    if not usuario or not contrasena:
-                        raise Exception("Credenciales no encontradas.")
+                    #usuario = os.getenv("MI_USUARIO")
+                    #contrasena = os.getenv("MI_CONTRASENA")
+                    if not osm_username or not osm_password:
+                        raise Exception("Credenciales de OSM no proporcionadas a la función de login.")
 
-                    username_input.fill(usuario)
-                    page.locator("#password").fill(contrasena)
+                    username_input.fill(osm_username)
+                    page.locator("#password").fill(osm_password)
                     
                     login_button = page.locator("#login")
                     print("  - Enviando formulario...")
