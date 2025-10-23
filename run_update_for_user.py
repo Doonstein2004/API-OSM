@@ -313,25 +313,12 @@ def sync_league_details(conn, standings_data, squad_values_data, league_id_map, 
 
 def get_osm_credentials(conn, user_id):
     """Obtiene y desencripta las credenciales de OSM para un usuario específico."""
-    print(f"  - Obteniendo credenciales para el usuario ID: {user_id}")
+    print(f"  - Obteniendo credenciales para el usuario ID: {user_id} usando Vault...")
     with conn.cursor() as cur:
-        # Esta consulta usa la función de desencriptación de pgsodium
-        sql = """
-            SELECT 
-                osm_username,
-                convert_from(
-                    pgsodium.crypto_aead_det_decrypt(
-                        osm_password_encrypted,
-                        convert_to(id::text, 'utf8'),
-                        'bf2a7b1b1c31114e9f783104c4b22055' -- La misma clave de contexto que usaste al encriptar
-                    ),
-                    'utf8'
-                ) AS osm_password
-            FROM public.users
-            WHERE id = %s;
-        """
-        cur.execute(sql, (user_id,))
+        
+        cur.execute("SELECT osm_username, osm_password FROM public.get_credentials_for_user(%s);", (user_id,))
         creds = cur.fetchone()
+        
         if not creds or not creds['osm_username'] or not creds['osm_password']:
             raise Exception("No se encontraron o no se pudieron desencriptar las credenciales de OSM para este usuario.")
         
