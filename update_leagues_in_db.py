@@ -80,7 +80,7 @@ def main():
             page = browser.new_page()
 
             # 2. Hacer login UNA SOLA VEZ
-            if not login_to_osm(page, "Doonstein", "4tQTYvctS2@!Nj6HH17g0WxpyFEyUp", max_retries=5):
+            if not login_to_osm(page, max_retries=5):
                 raise Exception("El proceso de login falló después de todos los reintentos.")
         except Exception as e:
             print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
