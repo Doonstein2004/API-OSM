@@ -1,38 +1,27 @@
 # .github/workflows/scrape_data.yml
 
-name: Scrape OSM Data Daily
+name: On-Demand OSM Scraper
 
 on:
+  # --- INICIO DE LA CORRECCIÓN ---
+  # Eliminamos 'schedule'. Este workflow solo se activa por API.
+  repository_dispatch:
+    types: [scrape-for-user]
+  # Mantenemos workflow_dispatch para pruebas manuales desde GitHub
   workflow_dispatch:
-  schedule:
-    # Horarios en UTC para que se ejecuten en los momentos deseados de São Paulo (UTC-3)
-    
-    # Ejecutar a las 08:00 UTC (05:00 São Paulo)
-    - cron: '0 8 * * *'
-    
-    # Ejecutar a las 13:00 UTC (10:00 São Paulo)
-    - cron: '0 13 * * *'
-    
-    # Ejecutar a las 18:00 UTC (15:00 São Paulo)
-    - cron: '0 18 * * *'
-    
-    # Ejecutar a las 21:30 UTC (18:30 São Paulo)
-    - cron: '30 21 * * *'
-    
-    # Ejecutar a las 00:00 UTC (21:00 São Paulo del día anterior)
-    - cron: '0 0 * * *'
+    inputs:
+      user_id:
+        description: 'User ID to scrape for (for manual runs)'
+        required: true
+  # --- FIN DE LA CORRECCIÓN ---
+  
 
 jobs:
-  scrape-and-update:
-    runs-on: ubuntu-latest # Usará una máquina virtual de Linux
+  scrape-for-user:
+    runs-on: ubuntu-latest
     steps:
-      # 1. Clona tu repositorio para tener acceso al código
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # 2. Configura el entorno de Python
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
 
@@ -47,8 +36,8 @@ jobs:
         run: playwright install --with-deps chromium
 
       # 5. Ejecuta el script de scraping
-      - name: Run scraping script
-        run: python run_update.py
+      - name: Run scraping script for user
+        run: python run_update_for_user.py ${{ github.event.inputs.user_id || github.event.client_payload.user_id }}
         # Pasa los secretos de GitHub a las variables de entorno del script
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
@@ -56,8 +45,6 @@ jobs:
           DB_NAME: ${{ secrets.DB_NAME }}
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          MI_USUARIO: ${{ secrets.MI_USUARIO }}
-          MI_CONTRASENA: ${{ secrets.MI_CONTRASENA }}
 
       - name: Send Discord Notification on Success
         if: success()
