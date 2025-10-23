@@ -331,49 +331,46 @@ def get_osm_credentials(conn, user_id):
 def run_update_for_user(user_id):
     print(f"🚀 Iniciando actualización a demanda para el usuario: {user_id}")
     
+    # --- FASE 1: OBTENER CREDENCIALES ---
     conn = get_db_connection()
     if not conn: return
-
     try:
         osm_username, osm_password = get_osm_credentials(conn, user_id)
     except Exception as e:
         print(f"❌ ERROR al obtener credenciales: {e}")
         return
     finally:
-        if conn:
-            conn.close() # Cerramos la conexión inmediatamente después de usarla
-            print("🔌 Conexión para obtener credenciales cerrada.")
+        if conn: conn.close()
+
+    # --- FASE 2: SCRAPING (TAREA LARGA) ---
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-
             if not login_to_osm(page, osm_username, osm_password):
                 raise Exception("El proceso de login falló.")
-
             print("\n[1/3] 🌐 Login exitoso. Ejecutando scrapers...")
             fichajes_data = get_transfers_data(page)
-            standings_data, squad_values_data = get_league_data(page) 
+            # Asumiendo que get_league_data devuelve ambos valores
+            standings_data, squad_values_data = get_league_data(page)
             print("✅ Datos dinámicos obtenidos con éxito.")
     except Exception as e:
         print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")
         return
 
-    # --- Lógica de procesamiento y sincronización ---
-    print("\n[2/3] 🐘 Reconectando a la base de datos para sincronizar...")
+    # --- FASE 3: SINCRONIZACIÓN CON LA BASE DE DATOS ---
+    print("\n[2/3] 🐘 Conectando a la base de datos para sincronizar...")
     conn = get_db_connection()
     if not conn: return
     
     try:
         print("\n[3/3] 🧠 Procesando y sincronizando datos...")
     
-        # --- CORRECCIÓN 1: RESETEAR 'is_active' PRIMERO ---
         with conn.cursor() as cur:
             print("  - Reseteando estado de ligas activas para este usuario...")
             cur.execute("UPDATE leagues SET is_active = FALSE WHERE user_id = %s;", (user_id,))
         conn.commit()
 
-        # Pasamos el user_id para filtrar correctamente
         all_leagues_data_from_db = get_leagues_for_mapping(conn, user_id)
         team_to_resolved_league = resolve_active_leagues(fichajes_data, all_leagues_data_from_db)
         dashboard_to_official_map = create_dashboard_to_official_league_map(standings_data, team_to_resolved_league)
@@ -383,25 +380,19 @@ def run_update_for_user(user_id):
         if not filtered_leagues_to_process:
             print("ℹ️ No se encontraron ligas con fichajes para procesar. Finalizando.")
             return
+
         print(f"  - Ligas activas encontradas: {list(filtered_leagues_to_process)}")
+        print("\n  - Sincronizando datos con PostgreSQL...")
 
-        print("\n[3/3] 🔄 Sincronizando datos con PostgreSQL...")
-
-        # --- CORRECCIÓN 2: OBTENER EL MAPA DE IDs FILTRADO POR USUARIO ---
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM leagues WHERE user_id = %s;", (user_id,))
             full_league_id_map = {row['name']: row['id'] for row in cur.fetchall()}
 
-        active_league_id_map = {
-            name: full_league_id_map[name] 
-            for name in filtered_leagues_to_process 
-            if name in full_league_id_map
-        }
+        active_league_id_map = { name: full_league_id_map[name] for name in filtered_leagues_to_process if name in full_league_id_map }
 
         if active_league_id_map:
             with conn.cursor() as cur:
                 active_ids = tuple(active_league_id_map.values())
-                # Usar ANY() es más seguro que formatear el string
                 query = "UPDATE leagues SET is_active = TRUE, last_scraped_at = %s WHERE id = ANY(%s) AND user_id = %s;"
                 cur.execute(query, (datetime.now(), list(active_ids), user_id))
                 print(f"  - {cur.rowcount} ligas marcadas como activas.")
@@ -411,11 +402,13 @@ def run_update_for_user(user_id):
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
         upload_data_to_postgres(conn, grouped_transfers, active_league_id_map, user_id)
 
-        print(f"\n✨ Proceso de sincronización completado para el usuario {user_id}.")
+        print("\n✨ Proceso de sincronización completado con éxito.")
     finally:
         if conn:
             conn.close()
-            print("\n🔌 Conexión con PostgreSQL cerrada.")
+            print("\n🔌 Conexión de sincronización cerrada.")
+
+
             
 
 if __name__ == "__main__":
