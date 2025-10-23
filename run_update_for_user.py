@@ -178,8 +178,7 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
             
             league_id = league_id_map.get(league_name)
             if not league_id: continue
-            
-            new_transfers_in_league = 0
+        
             
             # --- INICIO DE LA LÓGICA INTELIGENTE ---
             # Preparamos la sentencia SQL con la cláusula ON CONFLICT
@@ -191,9 +190,12 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
                     %(user_id)s, %(league_id)s, %(playerName)s, %(managerName)s, %(transactionType)s, 
                     %(position)s, %(round)s, %(baseValue)s, %(finalPrice)s, %(createdAt)s
                 )
+                -- La lista de columnas aquí DEBE coincidir con la restricción UNIQUE de la tabla
                 ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price)
                 DO NOTHING;
             """
+            
+            new_transfers_in_league = 0
             
             # Iteramos sobre cada fichaje scrapeado
             for t in transfers:

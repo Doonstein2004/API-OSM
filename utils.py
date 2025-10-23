@@ -45,99 +45,88 @@ def handle_popups(page):
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
 def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: int = 3):
     """
-    Proceso de login basado en un bucle de estado, que reacciona a la página actual.
+    Proceso de login final basado en un bucle de estado persistente que maneja todos los casos.
     """
-    print("Iniciando proceso de login basado en estado...")
-    ACTION_TIMEOUT = 120 * 1000  # 120 segundos
+    print("Iniciando proceso de login con bucle de estado persistente...")
+    ACTION_TIMEOUT = 120 * 1000
 
     for attempt in range(max_retries):
         try:
             print(f"--- Intento de Login {attempt + 1}/{max_retries} ---")
             
-            # Navegamos a la página de entrada una sola vez al principio del intento.
             page.goto("https://en.onlinesoccermanager.com/Login", timeout=ACTION_TIMEOUT, wait_until="domcontentloaded")
 
-            # --- INICIO DEL BUCLE DE ESTADO ---
-            # Este bucle se ejecutará hasta 10 veces para resolver el estado del login.
-            for _ in range(10): # Límite de 10 pasos para evitar bucles infinitos
-                print("Debug")
-                # Espera un poco para que la página se estabilice
-                page.wait_for_timeout(10000) 
-                print("Leão")
+            # Este bucle se ejecuta hasta que se resuelva el estado (éxito o fallo definitivo)
+            for step in range(15): # Límite de 15 pasos para evitar bucles infinitos
+                # Pausa generosa para que el JS de la página reaccione
+                print(f"  - [Paso {step+1}/15] Esperando a que la página se estabilice...")
+                page.wait_for_timeout(5000)
+                
                 current_url = page.url
                 print(f"  - Verificando estado. URL actual: {current_url}")
 
-                # ESTADO 1: Login Exitoso (Hemos llegado al dashboard)
-                if "Career" in current_url:
-                    print("  - ¡ESTADO: LOGIN EXITOSO! Estamos en el dashboard.")
+                # --- CASOS DE ÉXITO (TERMINAN EL BUCLE) ---
+                if "Career" in current_url or "ChooseLeague" in current_url:
+                    print("  - ¡ESTADO: LOGIN EXITOSO! Estamos en el dashboard o selección de liga.")
                     handle_popups(page)
-                    return True # Salimos de la función con éxito
+                    return True
 
-                # ESTADO 2: En la Página de Aviso de Privacidad
-                elif "PrivacyNotice" in current_url:
+                # --- CASO DE FALLO DEFINITIVO (TERMINA EL BUCLE) ---
+                error_locator = page.locator('span.feedback-message:has-text("incorrect")')
+                if error_locator.is_visible():
+                    print("  - ¡ESTADO: FALLO DETECTADO! Credenciales incorrectas.")
+                    raise Exception(f"Credenciales de OSM incorrectas para el usuario '{osm_username}'.")
+
+                # --- CASOS DE ACCIÓN (CONTINÚAN EL BUCLE) ---
+
+                # CASO 1: Página de Aviso de Privacidad
+                privacy_button = page.get_by_role("button", name="Accept", exact=True)
+                if privacy_button.is_visible():
                     print("  - ESTADO: Aviso de Privacidad. Aceptando...")
-                    accept_button = page.get_by_role("button", name="Accept", exact=True)
-                    accept_button.click(timeout=ACTION_TIMEOUT)
-                    # No esperamos navegación aquí, dejamos que el bucle vuelva a comprobar el estado.
-                    continue # Vuelve al inicio del bucle para re-evaluar la nueva página
-                
-                elif "ChooseLeague" in current_url:
-                    print("  - ESTADO: LOGIN EXITOSO! Estamos en la seleccion de ligas... Redirigiendo a Career.")
-                    page.goto("https://en.onlinesoccermanager.com/Career", timeout=ACTION_TIMEOUT, wait_until="domcontentloaded")
-                    # No esperamos navegación aquí, dejamos que el bucle vuelva a comprobar el estado.
-                    return True # Salimos de la función con éxito
+                    privacy_button.click()
+                    continue # Vuelve al inicio del bucle para re-evaluar
 
-                # ESTADO 3: En la Página de Registro
-                elif "Register" in current_url:
+                # CASO 2: Página de Registro
+                register_login_button = page.get_by_role("button", name="Log in", exact=True)
+                if "Register" in current_url and register_login_button.is_visible():
                     print("  - ESTADO: Página de Registro. Navegando a Login...")
-                    go_to_login_button = page.get_by_role("button", name="Log in", exact=True)
-                    go_to_login_button.click(timeout=ACTION_TIMEOUT)
-                    continue # Vuelve al inicio del bucle para re-evaluar la nueva página
+                    register_login_button.click()
+                    continue # Vuelve al inicio del bucle para re-evaluar
 
-                # ESTADO 4: En la Página de Login (Nuestro objetivo intermedio)
-                elif "/Login" in current_url:
-                    print("  - ESTADO: Página de Login. Rellenando formulario...")
-                    username_input = page.locator("#manager-name")
+                # CASO 3: Página de Login (con el formulario listo)
+                username_input = page.locator("#manager-name")
+                if "/Login" in current_url and username_input.is_visible():
+                    print("  - ESTADO: Página de Login. Rellenando y enviando formulario...")
                     
-                    # Verificamos si el formulario ya está visible
-                    if not username_input.is_visible():
-                        print("    - Formulario no visible, esperando...")
-                        page.wait_for_selector("#manager-name", state="visible", timeout=ACTION_TIMEOUT)
-
-                    #usuario = os.getenv("MI_USUARIO")
-                    #contrasena = os.getenv("MI_CONTRASENA")
                     if not osm_username or not osm_password:
-                        raise Exception("Credenciales de OSM no proporcionadas a la función de login.")
+                        raise Exception("Credenciales de OSM no proporcionadas.")
 
                     username_input.fill(osm_username)
                     page.locator("#password").fill(osm_password)
-                    
-                    login_button = page.locator("#login")
-                    print("  - Enviando formulario...")
-                    login_button.click(timeout=ACTION_TIMEOUT)
-                    print("Que pasa")
-                    continue # Vuelve al inicio del bucle para re-evaluar la nueva página
-
-                # ESTADO DESCONOCIDO: Si no estamos en ninguna de las páginas esperadas
-                else:
-                    print(f"  - ESTADO DESCONOCIDO. Refrescando la página...")
-                    page.reload(wait_until="domcontentloaded")
+                    page.locator("#login").click()
+                    # Después del clic, no hacemos nada más. El bucle se encargará de
+                    # esperar y re-evaluar la nueva página en la siguiente iteración.
                     continue
 
-            # Si salimos del bucle de 10 pasos sin éxito, el intento falla.
-            raise Exception("El flujo de login no se pudo resolver después de 10 pasos.")
+                # Si no se cumple ninguna de las condiciones anteriores, es que la página
+                # todavía está cargando o en un estado intermedio. El bucle esperará y lo reintentará.
+                print("  - Estado intermedio o cargando, esperando al siguiente ciclo...")
+
+            # Si después de 15 pasos no hemos llegado a un estado final, el intento falla.
+            raise Exception("El flujo de login no se pudo resolver (timeout de pasos).")
 
         except Exception as e:
-            # ... (la lógica de error y reintento no cambia)
+            # Misma lógica de manejo de errores que antes
+            if "Credenciales de OSM incorrectas" in str(e):
+                print(f"❌ ERROR DEFINITIVO: {e}")
+                return False
+            
             print(f"  - ADVERTENCIA: El intento {attempt + 1} falló.")
-            error_type = type(e).__name__
-            error_message = str(e).split('\n')[0]
-            print(f"    - Razón: {error_type} - {error_message}")
+            print(f"    - Razón: {str(e).splitlines()[0]}")
             try:
                 page.screenshot(path=f"login_error_attempt_{attempt + 1}.png")
                 print(f"    - Captura de pantalla guardada.")
-            except Exception as se:
-                print(f"    - No se pudo tomar la captura de pantalla: {se}")
+            except: pass
 
             if attempt < max_retries - 1:
                 print("    Reintentando en 10 segundos...")
@@ -147,5 +136,6 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
                 return False
     
     return False
+
 
 
