@@ -39,6 +39,7 @@ def get_market_data(page: Page):
                 continue
 
             team_name = slot.locator("h2.clubslot-main-title").inner_text()
+            league_name_on_dashboard = slot.locator("h4.display-name").inner_text()
             
             MAX_RETRIES = 3
             for attempt in range(MAX_RETRIES):
@@ -64,7 +65,7 @@ def get_market_data(page: Page):
                         time.sleep(0.5)
                         
                     print("  - Extrayendo jugadores en venta...")
-                    transfer_list_container = page.locator("#transfer-list-players")
+                    transfer_list_container = page.locator("#transfer-list")
                     expect(transfer_list_container).to_be_visible(timeout=60000)
                     
                     players_on_sale = []
@@ -87,7 +88,7 @@ def get_market_data(page: Page):
                             except Exception as e:
                                 print(f"    - ADVERTENCIA: Saltando fila de jugador en venta. Error: {e}")
                     
-                    all_teams_transfer_list.append({"team_name": team_name, "players_on_sale": players_on_sale})
+                    all_teams_transfer_list.append({"team_name": team_name, "league_name": league_name_on_dashboard, "players_on_sale": players_on_sale})
                     print(f"  ✓ {len(players_on_sale)} jugadores en venta extraídos.")
 
                     # --- PARTE 2: EXTRAER HISTORIAL DE FICHAJES ---
@@ -142,7 +143,7 @@ def get_market_data(page: Page):
                         }
                     """)
 
-                    all_teams_transfer_history.append({"team_name": team_name, "transfers": transfers_list})
+                    all_teams_transfer_history.append({"team_name": team_name, "league_name": league_name_on_dashboard, "transfers": transfers_list})
                     print(f"  - ¡ÉXITO! Se extrajeron {len(transfers_list)} fichajes del historial para {team_name}.")
                     break # Salir del bucle de reintento si todo fue exitoso
 
