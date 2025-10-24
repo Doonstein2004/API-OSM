@@ -53,6 +53,15 @@ def safe_int(value, default=0):
         return int(clean_value)
     except (ValueError, TypeError):
         return default
+    
+    
+def parse_value_string(value_str):
+    if not isinstance(value_str, str): return 0
+    value_str = value_str.lower().strip().replace(',', '')
+    if 'm' in value_str: return float(value_str.replace('m', ''))
+    if 'k' in value_str: return float(value_str.replace('k', '')) / 1000
+    try: return float(value_str)
+    except (ValueError, TypeError): return 0
 
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
