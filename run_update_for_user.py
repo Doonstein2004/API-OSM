@@ -16,7 +16,7 @@ from scraper_league_details import get_league_data
 
 # --- CONFIGURACIÓN ---
 load_dotenv()
-LEAGUES_TO_IGNORE = ["Champions Cup 25/26", "Greece"]
+LEAGUES_TO_IGNORE = ["Africa 2024", "All Stars Battle League", "Americas Cup 2019", "Americas Cup 2024", "Asia 2024", "Boss Tournament", "Club History A", "Club History B", "Club Stars", "Community League M", "Community League S", "Europe 2024", "Knockout Royale", "World 2002"]
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
@@ -73,11 +73,15 @@ def create_league_maps(all_leagues_data):
     return dict(team_to_leagues), dict(league_to_teams)
 
 
-def resolve_active_leagues(my_fichajes, all_leagues_data, league_details_data):
-    """Resuelve ambigüedades usando ÚNICAMENTE la composición de equipos."""
-    print("\n[3.1] 🧠 Resolviendo ligas activas...")
+def resolve_active_leagues(my_fichajes, all_leagues_data, league_details_data, leagues_to_ignore):
+    """
+    Resuelve ambigüedades usando ÚNICAMENTE la coincidencia por composición de equipos.
+    """
+    print("\n[3.1] 🧠 Resolviendo ligas activas por composición de equipos...")
     
-    my_managed_teams = {team['team_name'] for team in my_fichajes}
+    # Extraemos los nombres de los equipos gestionados que tienen fichajes
+    my_managed_teams = {team['team_name'] for team in my_fichajes if team.get("transfers")}
+    
     team_to_leagues_master, league_to_teams_master = create_league_maps(all_leagues_data)
     resolved_map = {}
 
@@ -93,28 +97,49 @@ def resolve_active_leagues(my_fichajes, all_leagues_data, league_details_data):
 
     for original_name in my_managed_teams:
         normalized_name = normalize_team_name(original_name)
-        candidate_leagues = team_to_leagues_master.get(normalized_name, [])
+        
+        # Filtrar candidatas al principio, excluyendo las de la lista de ignorados
+        candidate_leagues = [
+            name for name in team_to_leagues_master.get(normalized_name, []) 
+            if name not in leagues_to_ignore
+        ]
+
+        if not candidate_leagues:
+            print(f"  - No hay ligas candidatas válidas para '{original_name}'. Saltando.")
+            continue
 
         if len(candidate_leagues) == 1:
             resolved_map[original_name] = candidate_leagues[0]
-            print(f"  - Equipo '{original_name}' asignado a '{candidate_leagues[0]}'.")
-        elif len(candidate_leagues) > 1:
-            print(f"  - Ambigüedad para '{original_name}'. Candidatas: {candidate_leagues}. Usando composición de equipos...")
-            current_competitors = current_competitors_map.get(original_name)
-            if not current_competitors:
-                print(f"  - ADVERTENCIA: No se encontraron datos de clasificación para '{original_name}'.")
-                continue
+            print(f"  - Equipo '{original_name}' asignado unívocamente a la liga '{candidate_leagues[0]}'.")
+            continue
 
-            scores = {name: len(current_competitors.intersection(league_to_teams_master.get(name, set()))) for name in candidate_leagues}
-            print(f"  - Puntuaciones de coincidencia: {scores}")
-            
-            winner = max(scores, key=scores.get)
-            resolved_map[original_name] = winner
-            print(f"  - Ganador: '{winner}' con {scores[winner]} coincidencias.")
+        print(f"  - Ambigüedad para '{original_name}'. Candidatas válidas: {candidate_leagues}.")
+        
+        current_competitors = current_competitors_map.get(original_name)
+        if not current_competitors:
+            print(f"  - ADVERTENCIA: No se encontraron datos de clasificación para '{original_name}'. No se puede resolver.")
+            continue
+
+        scores = {name: len(current_competitors.intersection(league_to_teams_master.get(name, set()))) for name in candidate_leagues}
+        print(f"  - Puntuaciones de coincidencia de equipos: {scores}")
+        
+        # Encontrar la mejor puntuación
+        best_score = max(scores.values()) if scores else 0
+        
+        # CRITERIO DE DECISIÓN: Aceptamos un ganador solo si la mejor puntuación
+        # es significativamente alta (más del 50% de los equipos coinciden) Y es única.
+        if best_score > len(current_competitors) / 2:
+            winners = [name for name, score in scores.items() if score == best_score]
+            if len(winners) == 1:
+                winner_league = winners[0]
+                resolved_map[original_name] = winner_league
+                print(f"  - Ganador: '{winner_league}' con {scores[winner_league]} coincidencias.")
+            else:
+                print(f"  - ADVERTENCIA: Múltiples ganadores con la misma puntuación alta. No se puede resolver. Ganadores: {winners}")
         else:
-            print(f"  - ADVERTENCIA: Equipo '{original_name}' no encontrado en la lista maestra.")
-    
-    # Crear el mapa de dashboard a oficial AHORA, que es más fiable
+            print(f"  - ADVERTENCIA: Ninguna liga candidata tiene una coincidencia suficientemente alta (umbral > 50%).")
+
+    # Crear el mapa de dashboard a oficial
     dashboard_map = {}
     for dash_name, team_name in dashboard_to_team_map.items():
         if team_name in resolved_map:
@@ -122,6 +147,7 @@ def resolve_active_leagues(my_fichajes, all_leagues_data, league_details_data):
 
     print(f"\n[3.2] 🗺️ Mapa de Dashboard a Oficial creado: {dashboard_map}")
     return resolved_map, dashboard_map
+
 
 
 
