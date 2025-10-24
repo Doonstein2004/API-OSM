@@ -49,10 +49,20 @@ def get_market_data(page: Page):
                         slot.click()
                     
                     print(f"  - Entrando a la sección de transferencias...")
-                    page.goto(TRANSFERS_URL, wait_until="domcontentloaded", timeout=60000)
+                    page.goto(TRANSFERS_URL, wait_until="load", timeout=90000)
                     handle_popups(page)
 
                     # --- PARTE 1: EXTRAER LISTA DE JUGADORES EN VENTA ---
+                    print("  - Extrayendo jugadores en venta...")
+                    expect(page.locator("a[href='#transfer-history']")).to_be_visible(timeout=60000)
+                    
+                    print("  - Página de transferencias cargada. Manejando pop-ups...")
+
+                    # Manejo de pop-ups agresivo
+                    for _ in range(3):
+                        handle_popups(page)
+                        time.sleep(0.5)
+                        
                     print("  - Extrayendo jugadores en venta...")
                     transfer_list_container = page.locator("#transfer-list-players")
                     expect(transfer_list_container).to_be_visible(timeout=60000)
