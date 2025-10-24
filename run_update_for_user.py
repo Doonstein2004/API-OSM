@@ -446,7 +446,8 @@ def run_update_for_user(user_id):
         team_to_resolved_league, dashboard_to_official_map = resolve_active_leagues(
             fichajes_data, 
             all_leagues_data_from_db, 
-            standings_data  # Usamos standings_data para la resolución
+            standings_data,
+            LEAGUES_TO_IGNORE # Usamos standings_data para la resolución
         )
 
         official_leagues_from_transfers = set(team_to_resolved_league.values())
