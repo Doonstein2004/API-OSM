@@ -11,8 +11,8 @@ from playwright.sync_api import sync_playwright
 from utils import login_to_osm
 
 # --- AÑADIDO: Importar las funciones de los scrapers ---
-from scraper_transfers import get_transfers_data
 from scraper_league_details import get_league_data
+from scraper_market_data import get_market_data
 
 # --- CONFIGURACIÓN ---
 load_dotenv()
@@ -310,6 +310,38 @@ def get_all_leagues_from_db(cursor):
     cursor.execute("SELECT id, name, type, teams, managers_by_team, standings FROM leagues;")
     return {row['id']: dict(row) for row in cursor.fetchall()}
 
+
+def sync_transfer_list(conn, transfer_list_data, league_id, user_id):
+    print(f"  - Sincronizando la lista de transferencias para la liga ID {league_id}...")
+    with conn.cursor() as cur:
+        # 1. Borrar la lista antigua para este usuario y liga
+        cur.execute("DELETE FROM public.transfer_list_players WHERE user_id = %s AND league_id = %s;", (user_id, league_id))
+        print(f"    - {cur.rowcount} jugadores antiguos eliminados de la lista.")
+
+        # 2. Insertar los nuevos jugadores
+        if not transfer_list_data or isinstance(transfer_list_data, dict) and "error" in transfer_list_data:
+            print("    - No hay datos de jugadores en venta para insertar.")
+            return
+
+        sql = """
+            INSERT INTO public.transfer_list_players (
+                user_id, league_id, name, position, age, seller_team, 
+                seller_manager, attack, defense, overall, price
+            ) VALUES %s;
+        """
+        data_tuples = [
+            (
+                user_id, league_id, p['name'], p['position'], p['age'], p['seller_team'],
+                p['seller_manager'], p['attack'], p['defense'], p['overall'], p['price']
+            ) for p in transfer_list_data
+        ]
+        
+        if data_tuples:
+            psycopg2.extras.execute_values(cur, sql, data_tuples)
+            print(f"    - {len(data_tuples)} nuevos jugadores insertados en la lista.")
+    conn.commit()
+
+
 def sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map, user_id):
     print("\n🔄 Sincronizando detalles de ligas del usuario en 'user_leagues'...")
     with conn.cursor() as cur:
@@ -416,7 +448,7 @@ def run_update_for_user(user_id):
                 raise Exception("El proceso de login falló.")
 
             print("\n[1/3] 🌐 Login exitoso. Ejecutando scrapers...")
-            fichajes_data = get_transfers_data(page)
+            transfer_list_data, fichajes_data = get_market_data(page)
             standings_data, squad_values_data = get_league_data(page)
             
             fichajes_error = fichajes_data and isinstance(fichajes_data, list) and fichajes_data[0].get("error")
@@ -451,20 +483,19 @@ def run_update_for_user(user_id):
         )
 
         official_leagues_from_transfers = set(team_to_resolved_league.values())
-        filtered_leagues_to_process = {name for name in official_leagues_from_transfers if name not in LEAGUES_TO_IGNORE}
         
-        if not filtered_leagues_to_process:
+        if not official_leagues_from_transfers:
             print("ℹ️ No se encontraron ligas con fichajes para procesar. Finalizando.")
             return
 
-        print(f"  - Ligas activas encontradas: {list(filtered_leagues_to_process)}")
+        print(f"  - Ligas activas encontradas: {list(official_leagues_from_transfers)}")
 
         # 3. Obtener el mapa de IDs de la tabla global 'leagues'
         with conn.cursor() as cur:
             cur.execute("SELECT id, name FROM leagues;")
             full_league_id_map = {row['name']: row['id'] for row in cur.fetchall()}
         
-        active_league_id_map = { name: full_league_id_map[name] for name in filtered_leagues_to_process if name in full_league_id_map }
+        active_league_id_map = { name: full_league_id_map[name] for name in official_leagues_from_transfers if name in full_league_id_map }
         
         # 4. Actualizar el estado 'is_active' en la tabla de relación 'user_leagues'
         if active_league_id_map:
@@ -492,6 +523,19 @@ def run_update_for_user(user_id):
         sync_league_details(conn, standings_data, squad_values_data, active_league_id_map, dashboard_to_official_map, user_id)
         grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
         upload_data_to_postgres(conn, grouped_transfers, active_league_id_map, user_id)
+        
+        print("\n🔄 Sincronizando listas de jugadores en venta...")
+        for dash_name, official_name in dashboard_to_official_map.items():
+            if official_name in active_league_id_map:
+                league_id = active_league_id_map[official_name]
+                
+                # Buscamos en los datos scrapeados la entrada correspondiente a este dashboard_name
+                list_data_for_league = next((item for item in transfer_list_data if item.get("league_name") == dash_name), None)
+                
+                if list_data_for_league:
+                    sync_transfer_list(conn, list_data_for_league.get("players_on_sale"), league_id, user_id)
+                else:
+                    print(f"  - ADVERTENCIA: No se encontraron datos de la lista de transferencias para la liga del dashboard '{dash_name}'.")
 
         print("\n✨ Proceso de sincronización completado con éxito.")
     finally:
