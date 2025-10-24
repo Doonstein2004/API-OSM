@@ -392,6 +392,14 @@ def run_update_for_user(user_id):
             print("\n[1/3] 🌐 Login exitoso. Ejecutando scrapers...")
             fichajes_data = get_transfers_data(page)
             standings_data, squad_values_data = get_league_data(page)
+            
+            fichajes_error = fichajes_data and isinstance(fichajes_data, list) and fichajes_data[0].get("error")
+            standings_error = standings_data and isinstance(standings_data, list) and standings_data[0].get("error")
+
+            if fichajes_error or standings_error:
+                error_msg = fichajes_error or standings_error
+                raise Exception(f"Uno de los scrapers falló: {error_msg}")
+            
             print("✅ Datos dinámicos obtenidos con éxito.")
     except Exception as e:
         print(f"❌ ERROR CRÍTICO durante la fase de scraping: {e}")

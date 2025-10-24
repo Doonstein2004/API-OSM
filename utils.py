@@ -42,6 +42,19 @@ def handle_popups(page):
             break
         
 
+def safe_int(value, default=0):
+    """
+    Intenta convertir un valor a un entero. Si falla, devuelve un valor por defecto.
+    Maneja strings con comas, puntos, etc.
+    """
+    try:
+        # Eliminar caracteres no numéricos excepto el signo menos
+        clean_value = ''.join(filter(lambda i: i.isdigit() or i == '-', str(value)))
+        return int(clean_value)
+    except (ValueError, TypeError):
+        return default
+
+
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
 def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: int = 3):
     """

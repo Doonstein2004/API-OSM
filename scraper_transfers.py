@@ -57,7 +57,9 @@ def get_transfers_data(page):
                     #    Como ya estamos "dentro" del club, esta navegación funcionará.
                     print(f"  - Navegando directamente a {TRANSFERS_URL}...")
                     page.goto(TRANSFERS_URL, wait_until="domcontentloaded", timeout=60000)
-                    handle_popups(page)
+                    for _ in range(3):
+                        handle_popups(page)
+                        time.sleep(1)
                     
                     page.locator("a[href='#transfer-history']").click()
                     

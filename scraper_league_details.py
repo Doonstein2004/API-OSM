@@ -4,7 +4,7 @@ import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
-from utils import handle_popups
+from utils import handle_popups, safe_int
 
 load_dotenv()
 
@@ -66,32 +66,36 @@ def get_league_data(page):
                 rows = page.locator(f"{standings_table_selector} tbody tr.clickable")
                 
                 for row in rows.all():
-                    position = row.locator("td.td-ranking").inner_text()
-                    club_name = row.locator("span.ellipsis").inner_text()
-                    manager_locator = row.locator("span.text-italic")
-                    manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
-                    played = row.locator("td").nth(4).inner_text()
-                    won = row.locator("td").nth(6).inner_text()
-                    drew = row.locator("td").nth(7).inner_text()
-                    lost = row.locator("td").nth(8).inner_text()
-                    points = row.locator("td").nth(9).inner_text()
-                    goals_for = row.locator("td").nth(10).inner_text()
-                    goals_against = row.locator("td").nth(12).inner_text()
-                    goal_difference = row.locator("td.td-goaldifference").inner_text()
-                    
-                    standings_list.append({
-                        "Position": int(position),
-                        "Club": club_name,
-                        "Manager": manager_name,
-                        "Played": int(played),
-                        "Won": int(won),
-                        "Drew": int(drew),
-                        "Lost": int(lost),
-                        "Points": int(points),
-                        "GoalsFor": int(goals_for),
-                        "GoalsAgainst": int(goals_against),
-                        "GoalDifference": int(goal_difference)
-                    })
+                    try:
+                        position = row.locator("td.td-ranking").inner_text()
+                        club_name = row.locator("span.ellipsis").inner_text()
+                        manager_locator = row.locator("span.text-italic")
+                        manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
+                        played = safe_int(row.locator("td").nth(4).inner_text())
+                        won = safe_int(row.locator("td").nth(6).inner_text())
+                        drew = safe_int(row.locator("td").nth(7).inner_text())
+                        lost = safe_int(row.locator("td").nth(8).inner_text())
+                        points = safe_int(row.locator("td").nth(9).inner_text())
+                        goals_for = safe_int(row.locator("td").nth(10).inner_text())
+                        goals_against = safe_int(row.locator("td").nth(12).inner_text())
+                        goal_difference = safe_int(row.locator("td.td-goaldifference").inner_text())
+                        
+                        standings_list.append({
+                            "Position": safe_int(position),
+                            "Club": club_name,
+                            "Manager": manager_name,
+                            "Played": safe_int(played),
+                            "Won": safe_int(won),
+                            "Drew": safe_int(drew),
+                            "Lost": safe_int(lost),
+                            "Points": safe_int(points),
+                            "GoalsFor": safe_int(goals_for),
+                            "GoalsAgainst": safe_int(goals_against),
+                            "GoalDifference": safe_int(goal_difference)
+                        })
+                    except Exception as e:
+                        print(f"  - ADVERTENCIA: Saltando una fila en la tabla de clasificación. Error: {e}")
+                        continue
                 
                 print(f"  ✓ Clasificación extraída: {len(standings_list)} equipos")
                 
@@ -106,22 +110,26 @@ def get_league_data(page):
                 rows = squad_value_panel.locator("tbody tr.clickable")
                 
                 for row in rows.all():
-                    position = row.locator("td.td-ranking").inner_text()
-                    club_name = row.locator("span.ellipsis").inner_text()
-                    manager_locator = row.locator("span.text-italic")
-                    manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
-                    squad_value = row.locator("td").nth(2).locator("span.club-funds-amount").inner_text()
-                    player_count = row.locator("td").nth(3).inner_text()
-                    avg_value = row.locator("td").nth(4).locator("span.club-funds-amount").inner_text()
-                    
-                    squad_values_list.append({
-                        "Position": int(position),
-                        "Club": club_name,
-                        "Manager": manager_name,
-                        "Value": squad_value,
-                        "Players": int(player_count),
-                        "AverageValue": avg_value
-                    })
+                    try:
+                        position = safe_int(row.locator("td.td-ranking").inner_text())
+                        club_name = row.locator("span.ellipsis").inner_text()
+                        manager_locator = row.locator("span.text-italic")
+                        manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
+                        squad_value = row.locator("td").nth(2).locator("span.club-funds-amount").inner_text()
+                        player_count = safe_int(row.locator("td").nth(3).inner_text())
+                        avg_value = row.locator("td").nth(4).locator("span.club-funds-amount").inner_text()
+                        
+                        squad_values_list.append({
+                            "Position": safe_int(position),
+                            "Club": club_name,
+                            "Manager": manager_name,
+                            "Value": squad_value,
+                            "Players": safe_int(player_count),
+                            "AverageValue": avg_value
+                        })
+                    except Exception as e:
+                        print(f"  - ADVERTENCIA: Saltando una fila en la tabla de valores. Error: {e}")
+                        continue
                 
                 print(f"  ✓ Valores de equipo extraídos: {len(squad_values_list)} equipos")
                 
