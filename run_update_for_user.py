@@ -311,30 +311,28 @@ def get_all_leagues_from_db(cursor):
     return {row['id']: dict(row) for row in cursor.fetchall()}
 
 
-def sync_transfer_list(conn, transfer_list_data, league_id, user_id):
+def sync_transfer_list(conn, transfer_list_data, league_id, user_id, scrape_timestamp):
     print(f"  - Sincronizando la lista de transferencias para la liga ID {league_id}...")
     with conn.cursor() as cur:
-        # 1. Borrar la lista antigua para este usuario y liga
-        cur.execute("DELETE FROM public.transfer_list_players WHERE user_id = %s AND league_id = %s;", (user_id, league_id))
-        print(f"    - {cur.rowcount} jugadores antiguos eliminados de la lista.")
 
         # 2. Insertar los nuevos jugadores
-        if not transfer_list_data or isinstance(transfer_list_data, dict) and "error" in transfer_list_data:
-            print("    - No hay datos de jugadores en venta para insertar.")
-            return
+        if not transfer_list_data: return
 
         sql = """
             INSERT INTO public.transfer_list_players (
-                user_id, league_id, name, position, age, seller_team, 
-                seller_manager, attack, defense, overall, price
+                user_id, league_id, scrape_id, name, nationality, position, age, 
+                seller_team, seller_manager, attack, defense, overall, price
             ) VALUES %s;
         """
+        # Añadimos scrape_timestamp y nationality a la tupla de datos
         data_tuples = [
             (
-                user_id, league_id, p['name'], p['position'], p['age'], p['seller_team'],
-                p['seller_manager'], p['attack'], p['defense'], p['overall'], p['price']
+                user_id, league_id, scrape_timestamp, p['name'], p.get('nationality', 'N/A'),
+                p['position'], p['age'], p['seller_team'], p['seller_manager'],
+                p['attack'], p['defense'], p['overall'], p['price']
             ) for p in transfer_list_data
         ]
+
         
         if data_tuples:
             psycopg2.extras.execute_values(cur, sql, data_tuples)
@@ -441,6 +439,9 @@ def run_update_for_user(user_id):
 
     # --- FASE 2: SCRAPING (Tarea larga, sin conexión a BD) ---
     try:
+        # Obtenemos la hora atual
+        scrape_timestamp = datetime.now() 
+        
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
@@ -533,7 +534,7 @@ def run_update_for_user(user_id):
                 list_data_for_league = next((item for item in transfer_list_data if item.get("league_name") == dash_name), None)
                 
                 if list_data_for_league:
-                    sync_transfer_list(conn, list_data_for_league.get("players_on_sale"), league_id, user_id)
+                    sync_transfer_list(conn, list_data_for_league.get("players_on_sale"), league_id, user_id, scrape_timestamp)
                 else:
                     print(f"  - ADVERTENCIA: No se encontraron datos de la lista de transferencias para la liga del dashboard '{dash_name}'.")
 

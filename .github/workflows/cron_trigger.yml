@@ -1,0 +1,15 @@
+name: Scheduled Scrape Trigger
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Ejecutar cada 3 horas (8 veces al día)
+    - cron: '0 */3 * * *'
+
+jobs:
+  trigger-vercel-endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call Vercel API to trigger scrapes for all users
+        run: |
+          curl -X POST -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.VERCEL_CRON_URL }}"
