@@ -204,53 +204,75 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
         my_team_name = team_block.get("team_name")
         league_name = team_to_resolved_league.get(my_team_name)
         if not league_name: continue
+
         for transfer in team_block.get("transfers", []):
             from_parts = transfer.get("From", "").split('\n')
             to_parts = transfer.get("To", "").split('\n')
-            from_manager, to_manager = (from_parts[1] if len(from_parts) > 1 else None, to_parts[1] if len(to_parts) > 1 else None)
-            managerName, transaction_type = (to_manager, 'purchase') if to_manager else (from_manager, 'sale')
-            if managerName and transaction_type:
-                grouped_transfers[league_name].append({"playerName": transfer.get("Name"), "managerName": managerName, "transactionType": transaction_type, "position": transfer.get("Position"), "round": int(transfer.get("Gameweek", 0)), "baseValue": parse_value_string(transfer.get("Value")), "finalPrice": parse_value_string(transfer.get("Price")), "createdAt": datetime.now()})
+            
+            # Extraemos ambos mánagers
+            from_manager = from_parts[1].strip() if len(from_parts) > 1 else None
+            to_manager = to_parts[1].strip() if len(to_parts) > 1 else None
+
+            # Determinamos el tipo de transacción y el mánager principal
+            if to_manager: # Si hay comprador, es una compra para él
+                main_manager = to_manager
+                transaction_type = 'purchase'
+            elif from_manager: # Si solo hay vendedor, es una venta para él
+                main_manager = from_manager
+                transaction_type = 'sale'
+            else:
+                continue # Transferencia de la CPU, la ignoramos
+
+            grouped_transfers[league_name].append({
+                "playerName": transfer.get("Name"),
+                "managerName": main_manager, # Mantenemos esta para la lógica existente
+                "seller_manager": from_manager, # NUEVO
+                "buyer_manager": to_manager,   # NUEVO
+                "transactionType": transaction_type,
+                "position": transfer.get("Position"),
+                "round": int(transfer.get("Gameweek", 0)),
+                "baseValue": parse_value_string(transfer.get("Value")),
+                "finalPrice": parse_value_string(transfer.get("Price")),
+                "createdAt": datetime.now()
+            })
     return dict(grouped_transfers)
 
+
 def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
-    # Ya no borramos todo. En su lugar, insertamos de forma incremental.
     print("\n🔄 Sincronizando fichajes de forma inteligente...")
-    
     with conn.cursor() as cur:
-        total_new_transfers = 0
         for league_name, transfers in grouped_transfers.items():
-            if league_name in LEAGUES_TO_IGNORE:
-                continue
+            if league_name in LEAGUES_TO_IGNORE or not transfers: continue
             
             league_id = league_id_map.get(league_name)
             if not league_id: continue
             
+            # Tuplas de datos con los nuevos campos
             data_tuples = [
                 (
                     user_id, league_id, t['playerName'], t['managerName'], t['transactionType'],
-                    t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt']
+                    t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt'],
+                    t['seller_manager'], t['buyer_manager'] # NUEVO
                 ) for t in transfers
             ]
-        
             
-            # --- INICIO DE LA LÓGICA INTELIGENTE ---
-            # Preparamos la sentencia SQL con la cláusula ON CONFLICT
+            # SQL con las nuevas columnas
             sql = """
                 INSERT INTO transfers (
                     user_id, league_id, player_name, manager_name, transaction_type, 
-                    position, round, base_value, final_price, created_at
+                    position, round, base_value, final_price, created_at,
+                    seller_manager, buyer_manager -- NUEVO
                 ) VALUES %s
                 ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price)
                 DO NOTHING;
             """
             
-            psycopg2.extras.execute_values(cur, sql, data_tuples)
-            
+            psycopg2.extras.execute_values(cur, sql, data_tuples, page_size=200)
             print(f"  - Liga '{league_name}': Lote de {len(data_tuples)} fichajes procesado.")
 
     conn.commit()
     print("✅ Sincronización de fichajes completada.")
+
 
 # --- NUEVA FUNCIÓN ---
 def get_leagues_for_mapping(conn):
