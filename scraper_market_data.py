@@ -74,12 +74,22 @@ def get_market_data(page: Page):
                         rows = table.locator("tbody tr.clickable")
                         for row in rows.all():
                             try:
-                                    # Extraer nacionalidad del atributo 'title' del icono de la bandera
-                                nat_locator = row.locator("td:nth-child(1) > span.flag-icon")
-                                nationality = nat_locator.get_attribute("title") if nat_locator.count() > 0 else "N/A"
+                                # --- INICIO DE LA CORRECCIÓN DE NACIONALIDAD ---
+                                nationality = "N/A"  # Valor por defecto
+                                try:
+                                    # El selector busca el icono de la bandera dentro del primer <td>
+                                    nat_locator = row.locator("td:nth-child(1) > span.flag-icon")
+                                    if nat_locator.count() > 0:
+                                        nationality_title = nat_locator.get_attribute("title", timeout=1000)
+                                        if nationality_title:
+                                            nationality = nationality_title
+                                except Exception as nat_e:
+                                    print(f"    - ADVERTENCIA: No se pudo extraer la nacionalidad. Error: {nat_e}")
+                                # --- FIN DE LA CORRECCIÓN DE NACIONALIDAD ---
+
                                 players_on_sale.append({
                                     "name": row.locator("td:nth-child(1) > span.semi-bold").inner_text(),
-                                    "nationality": nationality,
+                                    "nationality": nationality, # Usamos el valor extraído o el por defecto
                                     "position": row.locator("td:nth-child(3)").inner_text(),
                                     "age": safe_int(row.locator("td:nth-child(4)").inner_text()),
                                     "seller_team": row.locator("td:nth-child(5) a.ellipsis, td:nth-child(5) span.ellipsis").first.inner_text(),
@@ -91,6 +101,7 @@ def get_market_data(page: Page):
                                 })
                             except Exception as e:
                                 print(f"    - ADVERTENCIA: Saltando fila de jugador en venta. Error: {e}")
+
                     
                     all_teams_transfer_list.append({"team_name": team_name, "league_name": league_name_on_dashboard, "players_on_sale": players_on_sale})
                     print(f"  ✓ {len(players_on_sale)} jugadores en venta extraídos.")
