@@ -74,8 +74,12 @@ def get_market_data(page: Page):
                         rows = table.locator("tbody tr.clickable")
                         for row in rows.all():
                             try:
+                                    # Extraer nacionalidad del atributo 'title' del icono de la bandera
+                                nat_locator = row.locator("td:nth-child(1) > span.flag-icon")
+                                nationality = nat_locator.get_attribute("title") if nat_locator.count() > 0 else "N/A"
                                 players_on_sale.append({
                                     "name": row.locator("td:nth-child(1) > span.semi-bold").inner_text(),
+                                    "nationality": nationality,
                                     "position": row.locator("td:nth-child(3)").inner_text(),
                                     "age": safe_int(row.locator("td:nth-child(4)").inner_text()),
                                     "seller_team": row.locator("td:nth-child(5) a.ellipsis, td:nth-child(5) span.ellipsis").first.inner_text(),
