@@ -75,17 +75,10 @@ def get_market_data(page: Page):
                         for row in rows.all():
                             try:
                                 # --- INICIO DE LA CORRECCIÓN DE NACIONALIDAD ---
-                                nationality = "N/A"  # Valor por defecto
-                                try:
-                                    # El selector busca el icono de la bandera dentro del primer <td>
-                                    nat_locator = row.locator("td:nth-child(1) > span.flag-icon")
-                                    if nat_locator.count() > 0:
-                                        nationality_title = nat_locator.get_attribute("title", timeout=1000)
-                                        if nationality_title:
-                                            nationality = nationality_title
-                                except Exception as nat_e:
-                                    print(f"    - ADVERTENCIA: No se pudo extraer la nacionalidad. Error: {nat_e}")
-                                # --- FIN DE LA CORRECCIÓN DE NACIONALIDAD ---
+                                
+                                nationality = row.locator("td:nth-child(1) > span.flag-icon").evaluate(
+                                    "(element) => element.getAttribute('title')"
+                                ) or "N/A"
 
                                 players_on_sale.append({
                                     "name": row.locator("td:nth-child(1) > span.semi-bold").inner_text(),
