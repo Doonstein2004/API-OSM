@@ -200,42 +200,72 @@ def sync_leagues_with_postgres(conn, active_league_names, all_leagues_data):
 
 def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
     grouped_transfers = defaultdict(list)
+    
+    # --- LÓGICA DE DEDUPLICACIÓN ROBUSTA ---
+    # Usamos un set para llevar un registro de los fichajes únicos que hemos visto.
+    # Esto nos protege si el scraper, por cualquier motivo, devuelve la misma fila de historial dos veces.
+    processed_transfers_keys = set()
+    # ------------------------------------
+
     for team_block in fichajes_data:
         my_team_name = team_block.get("team_name")
         league_name = team_to_resolved_league.get(my_team_name)
         if not league_name: continue
 
         for transfer in team_block.get("transfers", []):
-            from_parts = transfer.get("From", "").split('\n')
-            to_parts = transfer.get("To", "").split('\n')
-            
-            # Extraemos ambos mánagers
-            from_manager = from_parts[1].strip() if len(from_parts) > 1 else None
-            to_manager = to_parts[1].strip() if len(to_parts) > 1 else None
+            try:
+                # --- CREAR UNA CLAVE ÚNICA PARA CADA EVENTO DE FICHAJE ---
+                # Usamos los datos brutos del scraper para crear una "huella digital" del fichaje.
+                # Esto identifica de forma única la transacción en sí.
+                transfer_key = (
+                    transfer.get("Name"),
+                    transfer.get("From"),
+                    transfer.get("To"),
+                    transfer.get("Gameweek"),
+                    transfer.get("Price")
+                )
 
-            # Determinamos el tipo de transacción y el mánager principal
-            if to_manager: # Si hay comprador, es una compra para él
-                main_manager = to_manager
-                transaction_type = 'purchase'
-            elif from_manager: # Si solo hay vendedor, es una venta para él
-                main_manager = from_manager
-                transaction_type = 'sale'
-            else:
-                continue # Transferencia de la CPU, la ignoramos
+                # Si ya hemos procesado esta "huella digital", la saltamos para evitar duplicados.
+                if transfer_key in processed_transfers_keys:
+                    continue
+                
+                # Si es un fichaje nuevo, lo añadimos al registro y continuamos con el procesamiento.
+                processed_transfers_keys.add(transfer_key)
+                # ---------------------------------------------------
 
-            grouped_transfers[league_name].append({
-                "playerName": transfer.get("Name"),
-                "managerName": main_manager, # Mantenemos esta para la lógica existente
-                "seller_manager": from_manager, # NUEVO
-                "buyer_manager": to_manager,   # NUEVO
-                "transactionType": transaction_type,
-                "position": transfer.get("Position"),
-                "round": int(transfer.get("Gameweek", 0)),
-                "baseValue": parse_value_string(transfer.get("Value")),
-                "finalPrice": parse_value_string(transfer.get("Price")),
-                "createdAt": datetime.now()
-            })
+                from_parts = transfer.get("From", "").split('\n')
+                to_parts = transfer.get("To", "").split('\n')
+                
+                from_manager = from_parts[1].strip() if len(from_parts) > 1 else None
+                to_manager = to_parts[1].strip() if len(to_parts) > 1 else None
+
+                if to_manager:
+                    main_manager = to_manager
+                    transaction_type = 'purchase'
+                elif from_manager:
+                    main_manager = from_manager
+                    transaction_type = 'sale'
+                else:
+                    continue
+
+                grouped_transfers[league_name].append({
+                    "playerName": transfer.get("Name"),
+                    "managerName": main_manager,
+                    "seller_manager": from_manager,
+                    "buyer_manager": to_manager,
+                    "transactionType": transaction_type,
+                    "position": transfer.get("Position"),
+                    "round": int(transfer.get("Gameweek", 0)),
+                    "baseValue": parse_value_string(transfer.get("Value")),
+                    "finalPrice": parse_value_string(transfer.get("Price")),
+                    "createdAt": datetime.now()
+                })
+            except Exception as e:
+                print(f"  - ADVERTENCIA: Saltando un fichaje durante el procesamiento. Error: {e}")
+                continue
+                
     return dict(grouped_transfers)
+
 
 
 def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
@@ -264,7 +294,9 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
                     seller_manager, buyer_manager -- NUEVO
                 ) VALUES %s
                 ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price)
-                DO NOTHING;
+                DO UPDATE SET
+                    seller_manager = EXCLUDED.seller_manager,
+                    buyer_manager = EXCLUDED.buyer_manager;
             """
             
             psycopg2.extras.execute_values(cur, sql, data_tuples, page_size=200)
@@ -317,32 +349,64 @@ def get_all_leagues_from_db(cursor):
 
 
 def sync_transfer_list(conn, transfer_list_data, league_id, user_id, scrape_timestamp):
-    print(f"  - Sincronizando la lista de transferencias para la liga ID {league_id}...")
+    print(f"  - Sincronizando la lista de jugadores en venta para la liga ID {league_id}...")
+    
     with conn.cursor() as cur:
+        try:
+            # PASO 1: Archivar. Marcar todos los listados anteriores de esta liga como INACTIVOS.
+            print(f"    - Archivando listados antiguos para user_id={user_id}, league_id={league_id}.")
+            cur.execute(
+                "UPDATE public.transfer_list_players SET is_active = FALSE WHERE user_id = %s AND league_id = %s AND is_active = TRUE;",
+                (user_id, league_id)
+            )
+            print(f"    - {cur.rowcount} listados marcados como inactivos.")
 
-        # 2. Insertar los nuevos jugadores
-        if not transfer_list_data: return
+            if not transfer_list_data:
+                print("    - No hay jugadores en la lista de venta actual. Finalizando sincronización.")
+                conn.commit()
+                return
 
-        sql = """
-            INSERT INTO public.transfer_list_players (
-                user_id, league_id, scrape_id, name, nationality, position, age, 
-                seller_team, seller_manager, attack, defense, overall, price
-            ) VALUES %s;
-        """
-        # Añadimos scrape_timestamp y nationality a la tupla de datos
-        data_tuples = [
-            (
-                user_id, league_id, scrape_timestamp, p['name'], p.get('nationality', 'N/A'),
-                p['position'], p['age'], p['seller_team'], p['seller_manager'],
-                p['attack'], p['defense'], p['overall'], p['price']
-            ) for p in transfer_list_data
-        ]
+            # PASO 2: Insertar los nuevos y reactivar/actualizar los existentes.
+            sql = """
+                INSERT INTO public.transfer_list_players (
+                    user_id, league_id, name, seller_manager, nationality, position, age, 
+                    seller_team, attack, defense, overall, price, 
+                    scrape_id, scraped_at, is_active
+                ) VALUES %s
+                ON CONFLICT (user_id, league_id, name, seller_manager) -- Usa la restricción única correcta
+                DO UPDATE SET
+                    price = EXCLUDED.price,
+                    nationality = EXCLUDED.nationality,
+                    position = EXCLUDED.position,
+                    age = EXCLUDED.age,
+                    seller_team = EXCLUDED.seller_team,
+                    attack = EXCLUDED.attack,
+                    defense = EXCLUDED.defense,
+                    overall = EXCLUDED.overall,
+                    scrape_id = EXCLUDED.scrape_id,
+                    scraped_at = EXCLUDED.scraped_at,
+                    is_active = TRUE; -- ¡Clave! Reactivamos el listado.
+            """
+            
+            data_tuples = [
+                (
+                    user_id, league_id, p['name'], p['seller_manager'], p.get('nationality', 'N/A'),
+                    p['position'], p['age'], p['seller_team'], 
+                    p['attack'], p['defense'], p['overall'], p['price'],
+                    scrape_timestamp, scrape_timestamp, True
+                ) for p in transfer_list_data
+            ]
 
-        
-        if data_tuples:
-            psycopg2.extras.execute_values(cur, sql, data_tuples)
-            print(f"    - {len(data_tuples)} nuevos jugadores insertados en la lista.")
-    conn.commit()
+            if data_tuples:
+                psycopg2.extras.execute_values(cur, sql, data_tuples)
+                print(f"    - {cur.rowcount} jugadores en la lista de venta insertados o actualizados.")
+            
+            conn.commit()
+
+        except Exception as e:
+            print(f"    - ❌ ERROR CRÍTICO durante sync_transfer_list: {e}")
+            conn.rollback()
+
 
 
 def sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map, user_id):
