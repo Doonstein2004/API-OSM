@@ -232,9 +232,11 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
                 # Si es un fichaje nuevo, lo añadimos al registro y continuamos con el procesamiento.
                 processed_transfers_keys.add(transfer_key)
                 # ---------------------------------------------------
+                from_raw = transfer.get("From", "")
+                to_raw = transfer.get("To", "")
 
-                from_parts = transfer.get("From", "").split('\n')
-                to_parts = transfer.get("To", "").split('\n')
+                from_parts = from_raw.split('\n')
+                to_parts = to_raw.split('\n')
                 
                 from_manager = from_parts[1].strip() if len(from_parts) > 1 else None
                 to_manager = to_parts[1].strip() if len(to_parts) > 1 else None
@@ -253,6 +255,8 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
                     "managerName": main_manager,
                     "seller_manager": from_manager,
                     "buyer_manager": to_manager,
+                    "from_text": from_raw, # <-- NUEVO
+                    "to_text": to_raw, # <-- NUEVO
                     "transactionType": transaction_type,
                     "position": transfer.get("Position"),
                     "round": int(transfer.get("Gameweek", 0)),
@@ -282,7 +286,7 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
                 (
                     user_id, league_id, t['playerName'], t['managerName'], t['transactionType'],
                     t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt'],
-                    t['seller_manager'], t['buyer_manager'] # NUEVO
+                    t['seller_manager'], t['buyer_manager'], t['from_text'], t['to_text']  # NUEVO
                 ) for t in transfers
             ]
             
@@ -291,12 +295,14 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
                 INSERT INTO transfers (
                     user_id, league_id, player_name, manager_name, transaction_type, 
                     position, round, base_value, final_price, created_at,
-                    seller_manager, buyer_manager -- NUEVO
+                    seller_manager, buyer_manager, from_text, to_text -- NUEVO
                 ) VALUES %s
                 ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price)
                 DO UPDATE SET
                     seller_manager = EXCLUDED.seller_manager,
-                    buyer_manager = EXCLUDED.buyer_manager;
+                    buyer_manager = EXCLUDED.buyer_manager,
+                    from_text = EXCLUDED.from_text, -- <-- NUEVO
+                    to_text = EXCLUDED.to_text;     -- <-- NUEVO
             """
             
             psycopg2.extras.execute_values(cur, sql, data_tuples, page_size=200)
