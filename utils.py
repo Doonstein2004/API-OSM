@@ -18,6 +18,18 @@ def handle_popups(page):
             "name": "Pop-up de Anuncio/Modal Genérico",
             "selector": "#modal-dialog-centerpopup button.close",
             "force": True  # Usamos clic forzado por la posible capa <canvas>
+        },
+        {
+            "name": "Modal Custom (Batallas)",
+            "selector": "#customModalContainer .close, #customModalContainer .btn-close, #customModalContainer button:has-text('Close'), #customModalContainer button:has-text('X')",
+            "force": True
+        },
+        # Un selector genérico para cualquier backdrop que quede colgado
+        {
+            "name": "Backdrop Bloqueante",
+            "selector": "div.modal-backdrop",
+            "force": True,
+            "action": "evaluate_remove" # Lógica especial para eliminarlo del DOM
         }
     ]
 
