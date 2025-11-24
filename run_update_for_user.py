@@ -206,15 +206,24 @@ def sync_leagues_smart(conn, active_league_names, all_leagues_data, user_id, sta
                     cur.execute("UPDATE user_leagues SET is_active = FALSE WHERE user_id = %s AND league_id = %s", (user_id, old_league_id))
             
             print(f"  ?? Creando nueva instancia de liga para '{league_name}'...")
-            teams_for_db = [{"name": c["club"], "alias": c["club"], "initialValue": parse_value_string(c["squad_value"]), "fixedIncomePerRound": parse_value_string(c["fixed_income"]), "initialCash": 0, "currentValue": 0} for c in league_info.get("clubs", [])]
+            raw_clubs = league_info.get("clubs", [])
+            if raw_clubs and "club" in raw_clubs[0]:
+                # Caso A: Datos vienen del Scraper (tienen clave 'club') -> Convertir
+                teams_for_db = [{"name": c["club"], "alias": c["club"], "initialValue": parse_value_string(c["squad_value"]), "fixedIncomePerRound": parse_value_string(c["fixed_income"]), "initialCash": 0, "currentValue": 0} for c in raw_clubs]
+            else:
+                # Caso B: Datos vienen de la BD (tienen clave 'name') -> Usar tal cual
+                # Como ya están en la BD, ya tienen el formato correcto jsonb
+                teams_for_db = raw_clubs
+
             
             with conn.cursor() as cur:
                 # INSERT simple, permitiendo nombres duplicados con diferentes IDs
                 cur.execute(
-                    "INSERT INTO leagues (name, teams, managers_by_team, standings) VALUES (%s, %s, %s, %s) RETURNING id;",
-                    (league_name, json.dumps(teams_for_db), '{}', '[]')
+                    "INSERT INTO leagues (name, teams) VALUES (%s, %s) RETURNING id;",
+                    (league_name, json.dumps(teams_for_db))
                 )
                 league_id_to_use = cur.fetchone()['id']
+
                 
                 # Crear la relación activa en user_leagues
                 cur.execute(
