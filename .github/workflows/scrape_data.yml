@@ -46,6 +46,17 @@ jobs:
           DB_USER: ${{ secrets.DB_USER }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
 
+
+      - name: Upload Error Screenshots
+        if: failure() || success()  # Ejecutar siempre, por si el script manejó el error internamente pero guardó la foto
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-screenshots
+          path: |
+            *.png
+          if-no-files-found: ignore
+          retention-days: 5
+
       - name: Send Discord Notification on Success
         if: success()
         uses: tsickert/discord-webhook@v5.3.0
