@@ -1,4 +1,4 @@
-# run_update_for_user.py
+from_user.py
 import json
 import sys
 import os
@@ -338,7 +338,7 @@ def translate_and_group_transfers(fichajes_data, team_to_dashboard_map):
 
         for transfer in team_block.get("transfers", []):
             try:
-                # Deduplicación (igual que antes)
+                # Deduplicación (igual qFalsetes)
                 transfer_key = (transfer.get("Name"), transfer.get("From"), transfer.get("To"), transfer.get("Gameweek"), transfer.get("Price"))
                 if transfer_key in processed_transfers_keys: continue
                 processed_transfers_keys.add(transfer_key)
@@ -547,7 +547,7 @@ def run_update_for_user(user_id):
     try:
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             if not login_to_osm(page, osm_username, osm_password):
                 raise Exception("Login fallido.")
