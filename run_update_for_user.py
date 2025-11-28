@@ -68,62 +68,78 @@ def create_league_maps(all_leagues_data):
     return dict(team_to_leagues), dict(league_to_teams)
 
 def resolve_active_leagues(my_fichajes, all_leagues_data, league_details_data, leagues_to_ignore):
-    print("\n[3.1] ?? Resolviendo ligas activas por composición de equipos...")
+    print("\n[3.1] 🧠 Resolviendo ligas activas por composición de equipos...")
     
-    my_managed_teams = {team['team_name'] for team in my_fichajes if team.get("transfers")}
-    team_to_leagues_master, league_to_teams_master = create_league_maps(all_leagues_data)
-    resolved_map = {}
-
-    current_competitors_map = defaultdict(set)
-    dashboard_to_team_map = {}
+    # 1. Mapeo: Nombre Equipo -> Nombre Liga Dashboard (Desde los detalles scrapeados)
+    team_to_dashboard_map = {}
+    dashboard_to_official_map = {}
+    
+    # Pre-cargamos la info del scraper de detalles
+    current_competitors_map = {}
+    
     for league_info in league_details_data:
-        managed_team_name = league_info.get("team_name")
+        managed_team = league_info.get("team_name")
         dashboard_name = league_info.get("league_name")
-        if managed_team_name in my_managed_teams:
-            dashboard_to_team_map[dashboard_name] = managed_team_name
-            current_competitors = {normalize_team_name(team['Club']) for team in league_info.get("standings", [])}
-            current_competitors_map[managed_team_name] = current_competitors
-
-    for original_name in my_managed_teams:
-        normalized_name = normalize_team_name(original_name)
-        candidate_leagues = [name for name in team_to_leagues_master.get(normalized_name, []) if name not in leagues_to_ignore]
-
-        if not candidate_leagues:
-            print(f"  - No hay ligas candidatas válidas para '{original_name}'. Saltando.")
-            continue
-
-        if len(candidate_leagues) == 1:
-            resolved_map[original_name] = candidate_leagues[0]
-            print(f"  - Equipo '{original_name}' asignado unívocamente a la liga '{candidate_leagues[0]}'.")
-            continue
-
-        print(f"  - Ambigüedad para '{original_name}'. Candidatas válidas: {candidate_leagues}.")
-        current_competitors = current_competitors_map.get(original_name)
-        if not current_competitors:
-            print(f"  - ADVERTENCIA: Sin datos de clasificación para resolver '{original_name}'.")
-            continue
-
-        scores = {name: len(current_competitors.intersection(league_to_teams_master.get(name, set()))) for name in candidate_leagues}
-        best_score = max(scores.values()) if scores else 0
         
-        if best_score > len(current_competitors) / 2:
-            winners = [name for name, score in scores.items() if score == best_score]
-            if len(winners) == 1:
-                winner_league = winners[0]
-                resolved_map[original_name] = winner_league
-                print(f"  - Ganador: '{winner_league}' con {scores[winner_league]} coincidencias.")
+        # Guardamos la relación Equipo -> Dashboard
+        team_to_dashboard_map[managed_team] = dashboard_name
+        
+        # Preparamos los competidores para el análisis
+        current_competitors = {normalize_team_name(team['Club']) for team in league_info.get("standings", [])}
+        current_competitors_map[managed_team] = current_competitors
+
+    # 2. Mapas maestros de la Base de Datos
+    team_to_leagues_master, league_to_teams_master = create_league_maps(all_leagues_data)
+    
+    # 3. Resolución: Dashboard Name -> Official Name
+    for league_info in league_details_data:
+        dashboard_name = league_info.get("league_name")
+        managed_team = league_info.get("team_name")
+        
+        # Lógica de votación para encontrar el nombre oficial
+        candidate_official_names = []
+        
+        # A. Intentamos adivinar por el equipo del usuario
+        normalized_my_team = normalize_team_name(managed_team)
+        candidates_by_team = team_to_leagues_master.get(normalized_my_team, [])
+        
+        # Filtramos ignoradas
+        candidates_by_team = [c for c in candidates_by_team if c not in leagues_to_ignore]
+        
+        if len(candidates_by_team) == 1:
+            dashboard_to_official_map[dashboard_name] = candidates_by_team[0]
+            print(f"  - '{dashboard_name}' mapeada a '{candidates_by_team[0]}' (por equipo único).")
+            continue
+            
+        # B. Si hay ambigüedad, usamos los competidores (el resto de equipos de la liga)
+        competitors = current_competitors_map.get(managed_team, set())
+        scores = {}
+        
+        # Si no hay candidatos por equipo, probamos todas las ligas (caso raro)
+        search_space = candidates_by_team if candidates_by_team else league_to_teams_master.keys()
+        
+        for official_name in search_space:
+            if official_name in leagues_to_ignore: continue
+            official_teams = league_to_teams_master.get(official_name, set())
+            # Contamos cuántos equipos coinciden
+            match_count = len(competitors.intersection(official_teams))
+            scores[official_name] = match_count
+            
+        if scores:
+            best_match = max(scores, key=scores.get)
+            best_score = scores[best_match]
+            
+            # Umbral de confianza (por ejemplo, al menos el 30% de los equipos coinciden)
+            if best_score > len(competitors) * 0.3:
+                dashboard_to_official_map[dashboard_name] = best_match
+                print(f"  - '{dashboard_name}' mapeada a '{best_match}' (Coincidencia: {best_score} equipos).")
             else:
-                print(f"  - ADVERTENCIA: Múltiples ganadores con la misma puntuación. Ganadores: {winners}")
+                print(f"  ⚠️ No se pudo determinar la liga oficial para '{dashboard_name}'. Mejor intento: {best_match} ({best_score})")
         else:
-            print(f"  - ADVERTENCIA: Coincidencia insuficiente para resolver ambigüedad.")
+             print(f"  ⚠️ Sin datos para resolver '{dashboard_name}'.")
 
-    dashboard_map = {}
-    for dash_name, team_name in dashboard_to_team_map.items():
-        if team_name in resolved_map:
-            dashboard_map[dash_name] = resolved_map[team_name]
+    return team_to_dashboard_map, dashboard_to_official_map
 
-    print(f"\n[3.2] ??? Mapa de Dashboard a Oficial creado: {dashboard_map}")
-    return resolved_map, dashboard_map
 
 # --- FUNCIONES DE GESTIÓN DE TEMPORADAS ---
 
@@ -174,96 +190,162 @@ def check_league_continuity(conn, user_id, league_name, current_managers_set):
             return league_id, 'NEW_SEASON'
         else:
             return league_id, 'USE_EXISTING'
-
-def sync_leagues_smart(conn, active_league_names, all_leagues_data, user_id, standings_data, dashboard_to_official_map):
-    print("\n?? Sincronizando ligas (Lógica de Temporadas)...")
-    active_league_id_map = {}
-
-    for league_name in active_league_names:
-        # 1. Obtener datos actuales (managers) para comparar
-        league_info = next((l for l in all_leagues_data if l.get('league_name') == league_name), None)
-        if not league_info: continue
         
-        # Buscar managers actuales desde los standings scrapeados
+        
+def find_matching_active_league(conn, user_id, official_name, current_managers_set):
+    """
+    Busca entre las ligas activas del usuario con el mismo nombre oficial.
+    Retorna el ID de la liga si encuentra una donde los mánagers coincidan (>40%).
+    """
+    with conn.cursor() as cur:
+        # Traemos TODAS las ligas activas de ese tipo para este usuario
+        sql = """
+            SELECT l.id, ul.managers_by_team 
+            FROM user_leagues ul
+            JOIN leagues l ON ul.league_id = l.id
+            WHERE ul.user_id = %s AND l.name = %s AND ul.is_active = TRUE;
+        """
+        cur.execute(sql, (user_id, official_name))
+        candidates = cur.fetchall()
+        
+        best_match_id = None
+        best_match_ratio = 0.0
+        
+        for row in candidates:
+            league_id = row['id']
+            saved_managers_json = row['managers_by_team'] or {}
+            saved_managers = set(saved_managers_json.values())
+            
+            if not saved_managers: continue # Liga vacía, no podemos comparar
+            
+            common = current_managers_set.intersection(saved_managers)
+            ratio = len(common) / len(saved_managers)
+            
+            if ratio > best_match_ratio:
+                best_match_ratio = ratio
+                best_match_id = league_id
+        
+        # Umbral de coincidencia del 40%
+        if best_match_id and best_match_ratio > 0.40:
+            return best_match_id
+            
+        return None
+    
+
+def sync_leagues_smart(conn, dashboard_to_official_map, all_leagues_data, user_id, standings_data):
+    print("\n🔄 Sincronizando ligas (Soporte Multi-Instancia)...")
+    
+    # Mapa final: Nombre Dashboard -> ID Base de Datos
+    dashboard_to_id_map = {}
+    
+    # Lista de IDs que hemos confirmado/creado en esta ejecución
+    confirmed_league_ids = set()
+
+    for dashboard_name, official_name in dashboard_to_official_map.items():
+        print(f"  Analizando '{dashboard_name}' ({official_name})...")
+        
+        # 1. Obtener datos actuales
+        league_info_db = next((l for l in all_leagues_data if l.get('league_name') == official_name), None)
+        if not league_info_db: continue
+        
+        # 2. Obtener mánagers actuales del scraper
         current_managers_set = set()
-        dashboard_name = next((dn for dn, on in dashboard_to_official_map.items() if on == league_name), None)
-        if dashboard_name:
-            ls_data = next((ls for ls in standings_data if ls.get("league_name") == dashboard_name), None)
-            if ls_data:
-                for team in ls_data.get("standings", []):
-                    mgr = team.get("Manager", "N/A")
-                    if mgr and mgr != "N/A": current_managers_set.add(mgr)
-
-        # 2. Decidir si usamos la existente o creamos nueva
-        old_league_id, action = check_league_continuity(conn, user_id, league_name, current_managers_set)
-
-        league_id_to_use = None
-
-        if action == 'NEW_SEASON':
-            if old_league_id:
-                print(f"  ? Detectada NUEVA TEMPORADA para '{league_name}'. Archivando ID {old_league_id}...")
-                with conn.cursor() as cur:
-                    cur.execute("UPDATE user_leagues SET is_active = FALSE WHERE user_id = %s AND league_id = %s", (user_id, old_league_id))
-            
-            print(f"  ?? Creando nueva instancia de liga para '{league_name}'...")
-            raw_clubs = league_info.get("clubs", [])
-            if raw_clubs and "club" in raw_clubs[0]:
-                # Caso A: Datos vienen del Scraper (tienen clave 'club') -> Convertir
-                teams_for_db = [{"name": c["club"], "alias": c["club"], "initialValue": parse_value_string(c["squad_value"]), "fixedIncomePerRound": parse_value_string(c["fixed_income"]), "initialCash": 0, "currentValue": 0} for c in raw_clubs]
-            else:
-                # Caso B: Datos vienen de la BD (tienen clave 'name') -> Usar tal cual
-                # Como ya están en la BD, ya tienen el formato correcto jsonb
-                teams_for_db = raw_clubs
-
-            
+        ls_data = next((ls for ls in standings_data if ls.get("league_name") == dashboard_name), None)
+        if ls_data:
+            for team in ls_data.get("standings", []):
+                mgr = team.get("Manager", "N/A")
+                if mgr and mgr != "N/A": current_managers_set.add(mgr)
+        
+        # 3. Buscar si ya existe una liga activa compatible en la BD
+        matched_id = find_matching_active_league(conn, user_id, official_name, current_managers_set)
+        
+        # Evitar asignar el mismo ID a dos dashboards diferentes en la misma ejecución
+        if matched_id in confirmed_league_ids:
+            matched_id = None # Forzar creación de nueva porque este ID ya se usó para otra liga hoy
+        
+        final_id = None
+        
+        if matched_id:
+            print(f"    ✅ Encontrada liga existente ID {matched_id} (Managers coinciden).")
+            final_id = matched_id
+            # Actualizamos timestamp
             with conn.cursor() as cur:
-                # INSERT simple, permitiendo nombres duplicados con diferentes IDs
+                cur.execute("UPDATE user_leagues SET last_scraped_at = NOW() WHERE user_id = %s AND league_id = %s", (user_id, final_id))
+            conn.commit()
+        else:
+            print(f"    ✨ Creando NUEVA instancia para '{dashboard_name}'...")
+            
+            # Preparar equipos para insertar
+            raw_clubs = league_info_db.get("clubs", [])
+            if raw_clubs and isinstance(raw_clubs, list) and len(raw_clubs) > 0 and "club" in raw_clubs[0]:
+                 teams_for_db = [{"name": c["club"], "alias": c["club"], "initialValue": parse_value_string(c["squad_value"]), "fixedIncomePerRound": parse_value_string(c["fixed_income"]), "initialCash": 0, "currentValue": 0} for c in raw_clubs]
+            else:
+                 teams_for_db = raw_clubs
+
+            with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO leagues (name, teams) VALUES (%s, %s) RETURNING id;",
-                    (league_name, json.dumps(teams_for_db))
+                    (official_name, json.dumps(teams_for_db))
                 )
-                league_id_to_use = cur.fetchone()['id']
-
+                final_id = cur.fetchone()['id']
                 
-                # Crear la relación activa en user_leagues
                 cur.execute(
                     "INSERT INTO user_leagues (user_id, league_id, is_active, last_scraped_at) VALUES (%s, %s, TRUE, NOW())",
-                    (user_id, league_id_to_use)
+                    (user_id, final_id)
                 )
             conn.commit()
-            print(f"  ? Nueva temporada creada con ID: {league_id_to_use}")
+            print(f"    ✅ Nueva liga creada con ID: {final_id}")
 
-        else: # USE_EXISTING
-            league_id_to_use = old_league_id
-            print(f"  ? Continuando temporada existente (ID {league_id_to_use}) para '{league_name}'.")
+        dashboard_to_id_map[dashboard_name] = final_id
+        confirmed_league_ids.add(final_id)
 
-        active_league_id_map[league_name] = league_id_to_use
+    # 4. Limpieza: Desactivar ligas que el usuario tenía activas pero que NO están en los dashboards de hoy
+    # Esto maneja el caso de que una liga haya terminado.
+    print("  🧹 Verificando ligas terminadas...")
+    with conn.cursor() as cur:
+        # Obtener todas las ligas activas del usuario
+        cur.execute("SELECT league_id FROM user_leagues WHERE user_id = %s AND is_active = TRUE", (user_id,))
+        active_db_ids = {row['league_id'] for row in cur.fetchall()}
+        
+        # Identificar las que ya no están en la lista confirmada
+        ids_to_deactivate = active_db_ids - confirmed_league_ids
+        
+        if ids_to_deactivate:
+            print(f"    ❄️ Archivando {len(ids_to_deactivate)} ligas que ya no están en el dashboard: {ids_to_deactivate}")
+            cur.execute(
+                "UPDATE user_leagues SET is_active = FALSE WHERE user_id = %s AND league_id IN %s",
+                (user_id, tuple(ids_to_deactivate))
+            )
+            conn.commit()
 
-    return active_league_id_map
+    return dashboard_to_id_map
 
 
-def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
+
+def translate_and_group_transfers(fichajes_data, team_to_dashboard_map):
     grouped_transfers = defaultdict(list)
     processed_transfers_keys = set()
 
     for team_block in fichajes_data:
         my_team_name = team_block.get("team_name")
-        league_name = team_to_resolved_league.get(my_team_name)
-        if not league_name: continue
+        
+        # CAMBIO CLAVE: Usamos el nombre del dashboard, no el oficial
+        dashboard_league_name = team_to_dashboard_map.get(my_team_name)
+        
+        if not dashboard_league_name: 
+            print(f"  ⚠️ Saltando transfers de '{my_team_name}': No tiene liga dashboard asignada.")
+            continue
 
         for transfer in team_block.get("transfers", []):
             try:
-                transfer_key = (
-                    transfer.get("Name"), transfer.get("From"), transfer.get("To"),
-                    transfer.get("Gameweek"), transfer.get("Price")
-                )
+                # Deduplicación (igual que antes)
+                transfer_key = (transfer.get("Name"), transfer.get("From"), transfer.get("To"), transfer.get("Gameweek"), transfer.get("Price"))
                 if transfer_key in processed_transfers_keys: continue
                 processed_transfers_keys.add(transfer_key)
 
-                from_raw = transfer.get("From", "")
-                to_raw = transfer.get("To", "")
-                from_parts = from_raw.split('\n')
-                to_parts = to_raw.split('\n')
+                # Parsing (igual que antes)
+                from_parts = transfer.get("From", "").split('\n')
+                to_parts = transfer.get("To", "").split('\n')
                 from_manager = from_parts[1].strip() if len(from_parts) > 1 else None
                 to_manager = to_parts[1].strip() if len(to_parts) > 1 else None
 
@@ -276,13 +358,14 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
                 else:
                     continue
 
-                grouped_transfers[league_name].append({
+                # Guardamos bajo la clave del DASHBOARD
+                grouped_transfers[dashboard_league_name].append({
                     "playerName": transfer.get("Name"),
                     "managerName": main_manager,
                     "seller_manager": from_manager,
                     "buyer_manager": to_manager,
-                    "from_text": from_raw, 
-                    "to_text": to_raw,
+                    "from_text": transfer.get("From", ""), 
+                    "to_text": transfer.get("To", ""),
                     "transactionType": transaction_type,
                     "position": transfer.get("Position"),
                     "round": int(transfer.get("Gameweek", 0)),
@@ -291,10 +374,11 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
                     "createdAt": datetime.now()
                 })
             except Exception as e:
-                print(f"  - ADVERTENCIA: Saltando un fichaje durante el procesamiento. Error: {e}")
+                print(f"  - Error procesando transfer: {e}")
                 continue
                 
     return dict(grouped_transfers)
+
 
 def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
     print("\n?? Sincronizando fichajes...")
@@ -463,7 +547,7 @@ def run_update_for_user(user_id):
     try:
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=False)
             page = browser.new_page()
             if not login_to_osm(page, osm_username, osm_password):
                 raise Exception("Login fallido.")
@@ -491,61 +575,68 @@ def run_update_for_user(user_id):
     try:
         # A. Mapeo de ligas
         all_leagues_data_from_db = get_leagues_for_mapping(conn)
-        team_to_resolved_league, dashboard_to_official_map = resolve_active_leagues(
+        
+        # AHORA OBTENEMOS TAMBIÉN EL MAPA EQUIPO->DASHBOARD
+        team_to_dashboard_map, dashboard_to_official_map = resolve_active_leagues(
             fichajes_data, all_leagues_data_from_db, standings_data, LEAGUES_TO_IGNORE
         )
-        official_leagues_from_transfers = set(team_to_resolved_league.values())
         
-        if not official_leagues_from_transfers:
-            print("?? No hay ligas activas con datos para procesar.")
+        if not dashboard_to_official_map:
+            print("ℹ️ No hay ligas activas con datos para procesar.")
             return
 
-        print(f"  - Ligas activas: {list(official_leagues_from_transfers)}")
+        print(f"  - Ligas detectadas en dashboard: {list(dashboard_to_official_map.keys())}")
 
-        # B. Obtener IDs Correctos (Gestión de Temporadas)
-        # ESTE ES EL CAMBIO CLAVE: Usamos sync_leagues_smart para obtener los IDs
-        active_league_id_map = sync_leagues_smart(
+        # B. Obtener IDs (Usando el mapa de Dashboards)
+        # IMPORTANTE: Pasamos dashboard_to_official_map
+        dashboard_to_id_map = sync_leagues_smart(
             conn, 
-            official_leagues_from_transfers, 
+            dashboard_to_official_map,  # <-- CAMBIO
             all_leagues_data_from_db, 
             user_id, 
-            standings_data, 
-            dashboard_to_official_map
+            standings_data
         )
         
-        # C. Asegurar que las ligas activas estén marcadas en user_leagues
-        if active_league_id_map:
-            with conn.cursor() as cur:
-                # Resetear activas para asegurar limpieza (opcional pero seguro)
-                cur.execute("UPDATE public.user_leagues SET is_active = FALSE WHERE user_id = %s;", (user_id,))
+        # C. Sincronizar Detalles (Usando el ID correcto para cada Dashboard Name)
+        print("\n🔄 Sincronizando detalles...")
+        with conn.cursor() as cur:
+            for dash_name, league_id in dashboard_to_id_map.items():
+                if not league_id: continue
                 
-                # Activar las actuales
-                now = datetime.now()
-                sql_activate = """
-                    INSERT INTO public.user_leagues (user_id, league_id, is_active, last_scraped_at)
-                    VALUES (%s, %s, TRUE, %s)
-                    ON CONFLICT (user_id, league_id) DO UPDATE SET
-                        is_active = TRUE,
-                        last_scraped_at = EXCLUDED.last_scraped_at;
-                """
-                for league_id in active_league_id_map.values():
-                    cur.execute(sql_activate, (user_id, league_id, now))
-            conn.commit()
-            
-        # D. Sincronizar Detalles, Fichajes y Mercado usando los IDs correctos
-        sync_league_details(conn, standings_data, squad_values_data, active_league_id_map, dashboard_to_official_map, user_id)
-        grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_resolved_league)
-        upload_data_to_postgres(conn, grouped_transfers, active_league_id_map, user_id)
-        
-        print("\n?? Sincronizando Mercado...")
-        for dash_name, official_name in dashboard_to_official_map.items():
-            if official_name in active_league_id_map:
-                league_id = active_league_id_map[official_name]
-                list_data = next((i for i in transfer_list_data if i.get("league_name") == dash_name), None)
-                if list_data:
-                    sync_transfer_list(conn, list_data.get("players_on_sale"), league_id, user_id, scrape_timestamp)
+                # Buscar datos scrapeados específicos para ESTE dashboard name
+                ls_data = next((ls for ls in standings_data if ls.get("league_name") == dash_name), None)
+                lv_data = next((lv for lv in squad_values_data if lv.get("league_name") == dash_name), None)
+                
+                managers, standings, squad_vals = {}, [], []
+                
+                if ls_data:
+                    standings = ls_data.get("standings", [])
+                    for team in standings:
+                        if team.get("Manager") and team.get("Manager") != "N/A": 
+                            managers[team["Club"]] = team["Manager"]
+                if lv_data:
+                    squad_vals = lv_data.get("squad_values_ranking", [])
 
-        print("\n? Proceso finalizado correctamente.")
+                sql = """
+                    UPDATE user_leagues 
+                    SET standings = %s, squad_values = %s, managers_by_team = %s
+                    WHERE user_id = %s AND league_id = %s
+                """
+                cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(managers), user_id, league_id))
+        conn.commit()
+
+        # D. Sincronizar Fichajes (Agrupados por Dashboard Name)
+        grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_dashboard_map)
+        upload_data_to_postgres(conn, grouped_transfers, dashboard_to_id_map, user_id)
+        
+        # E. Sincronizar Mercado
+        print("\n📦 Sincronizando Mercado...")
+        for dash_name, league_id in dashboard_to_id_map.items():
+            list_data = next((i for i in transfer_list_data if i.get("league_name") == dash_name), None)
+            if list_data:
+                sync_transfer_list(conn, list_data.get("players_on_sale"), league_id, user_id, scrape_timestamp)
+
+        print("\n✨ Proceso finalizado correctamente.")
     finally:
         if conn: conn.close()
 
