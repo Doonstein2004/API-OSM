@@ -381,7 +381,7 @@ def translate_and_group_transfers(fichajes_data, team_to_dashboard_map):
 
 
 def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
-    print("\n?? Sincronizando fichajes...")
+    print("\n📦 Sincronizando fichajes...")
     with conn.cursor() as cur:
         for league_name, transfers in grouped_transfers.items():
             if league_name in LEAGUES_TO_IGNORE or not transfers: continue
@@ -389,13 +389,33 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
             league_id = league_id_map.get(league_name)
             if not league_id: continue
             
+            # --- CORRECCIÓN: Deduplicación estricta pre-SQL ---
+            # Filtramos duplicados dentro del lote actual basándonos EXACTAMENTE
+            # en las columnas de la 'unique_transfer_constraint' de la BD.
+            unique_batch = {}
+            for t in transfers:
+                # Clave única basada en la restricción de la BD
+                # (user_id, league_id, round, player_name, manager_name, final_price)
+                constraint_key = (
+                    user_id,
+                    league_id,
+                    t['round'],
+                    t['playerName'],
+                    t['managerName'],
+                    t['finalPrice']
+                )
+                # Si hay duplicados, nos quedamos con el último procesado
+                unique_batch[constraint_key] = t
+            
+            # Generamos las tuplas solo con los datos únicos
             data_tuples = [
                 (
                     user_id, league_id, t['playerName'], t['managerName'], t['transactionType'],
                     t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt'],
                     t['seller_manager'], t['buyer_manager'], t['from_text'], t['to_text']
-                ) for t in transfers
+                ) for t in unique_batch.values()
             ]
+            # --------------------------------------------------
             
             sql = """
                 INSERT INTO transfers (
@@ -410,8 +430,11 @@ def upload_data_to_postgres(conn, grouped_transfers, league_id_map, user_id):
                     from_text = EXCLUDED.from_text,
                     to_text = EXCLUDED.to_text;
             """
-            psycopg2.extras.execute_values(cur, sql, data_tuples, page_size=200)
-            print(f"  - Liga '{league_name}': {len(data_tuples)} fichajes procesados.")
+            
+            if data_tuples:
+                psycopg2.extras.execute_values(cur, sql, data_tuples, page_size=200)
+                print(f"  - Liga '{league_name}': {len(data_tuples)} fichajes procesados (Deduplicados de {len(transfers)} originales).")
+            
     conn.commit()
 
 def get_leagues_for_mapping(conn):
