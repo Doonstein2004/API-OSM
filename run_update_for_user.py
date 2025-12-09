@@ -458,10 +458,11 @@ def get_leagues_for_mapping(conn):
         return results
 
 def sync_transfer_list(conn, transfer_list_data, league_id, user_id, scrape_timestamp):
-    print(f"  - Sincronizando lista de transferencias (ID {league_id})...")
+    print(f"  - Sincronizando lista de venta (ID {league_id})...")
+    
     with conn.cursor() as cur:
         try:
-            # Archivar listados antiguos
+            # 1. Archivar listados antiguos (Esto se queda igual)
             cur.execute(
                 "UPDATE public.transfer_list_players SET is_active = FALSE WHERE user_id = %s AND league_id = %s AND is_active = TRUE;",
                 (user_id, league_id)
@@ -471,15 +472,38 @@ def sync_transfer_list(conn, transfer_list_data, league_id, user_id, scrape_time
                 conn.commit()
                 return
 
+            # --- CORRECCIÓN: DEDUPLICACIÓN PREVIA ---
+            # Creamos un diccionario para asegurar que cada par (nombre, vendedor) sea único.
+            # Si el scraper trajo el mismo jugador dos veces, nos quedamos con la última versión.
+            unique_players = {}
+            for p in transfer_list_data:
+                # La clave única debe coincidir con la restricción UNIQUE de tu base de datos
+                # Constraint: (user_id, league_id, name, seller_manager)
+                key = (p['name'], p['seller_manager'])
+                unique_players[key] = p
+            
+            # Ahora generamos las tuplas usando solo los datos únicos
+            data_tuples = [
+                (
+                    user_id, league_id, p['name'], p['seller_manager'], p.get('nationality', 'N/A'),
+                    p['position'], p['age'], p['seller_team'], 
+                    p['attack'], p['defense'], p['overall'], 
+                    p['price'], p.get('value', 0), # Base value
+                    scrape_timestamp, scrape_timestamp, True
+                ) for p in unique_players.values()
+            ]
+            # ----------------------------------------
+
             sql = """
                 INSERT INTO public.transfer_list_players (
                     user_id, league_id, name, seller_manager, nationality, position, age, 
-                    seller_team, attack, defense, overall, price, 
+                    seller_team, attack, defense, overall, price, base_value, 
                     scrape_id, scraped_at, is_active
                 ) VALUES %s
                 ON CONFLICT (user_id, league_id, name, seller_manager)
                 DO UPDATE SET
                     price = EXCLUDED.price,
+                    base_value = EXCLUDED.base_value,
                     nationality = EXCLUDED.nationality,
                     position = EXCLUDED.position,
                     age = EXCLUDED.age,
@@ -491,20 +515,18 @@ def sync_transfer_list(conn, transfer_list_data, league_id, user_id, scrape_time
                     scraped_at = EXCLUDED.scraped_at,
                     is_active = TRUE;
             """
-            data_tuples = [
-                (
-                    user_id, league_id, p['name'], p['seller_manager'], p.get('nationality', 'N/A'),
-                    p['position'], p['age'], p['seller_team'], 
-                    p['attack'], p['defense'], p['overall'], p['price'],
-                    scrape_timestamp, scrape_timestamp, True
-                ) for p in transfer_list_data
-            ]
+            
             if data_tuples:
                 psycopg2.extras.execute_values(cur, sql, data_tuples)
+                print(f"    - {len(data_tuples)} jugadores insertados/actualizados (Deduplicados de {len(transfer_list_data)} originales).")
+            
             conn.commit()
+
         except Exception as e:
-            print(f"    - ? ERROR en sync_transfer_list: {e}")
+            print(f"    - ❌ ERROR en sync_transfer_list: {e}")
             conn.rollback()
+
+
 
 def sync_league_details(conn, standings_data, squad_values_data, league_id_map, dashboard_to_official_map, user_id):
     print("\n?? Sincronizando detalles (Standings/Valores) en 'user_leagues'...")
