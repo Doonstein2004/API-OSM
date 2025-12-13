@@ -13,6 +13,7 @@ from utils import login_to_osm
 # --- Importar las funciones de los scrapers ---
 from scraper_league_details import get_league_data
 from scraper_market_data import get_market_data
+from scraper_match_results import get_match_results
 
 # --- CONFIGURACIÓN ---
 load_dotenv()
@@ -562,6 +563,36 @@ def sync_league_details(conn, standings_data, squad_values_data, league_id_map, 
             except Exception as e:
                 print(f"  - ? ERROR al sincronizar detalles para '{official_name}': {e}")
     conn.commit()
+    
+
+def sync_matches(conn, matches_data, dashboard_to_id_map, user_id):
+    with conn.cursor() as cur:
+        for league_info in matches_data:
+            league_id = dashboard_to_id_map.get(league_info["league_name"])
+            if not league_id: continue
+
+            for m in league_info["matches"]:
+                sql = """
+                    INSERT INTO public.matches (
+                        user_id, league_id, round, home_team, away_team, 
+                        home_goals, away_goals, events, statistics, ratings
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (league_id, round, home_team, away_team) 
+                    DO UPDATE SET
+                        home_goals = EXCLUDED.home_goals,
+                        away_goals = EXCLUDED.away_goals,
+                        events = EXCLUDED.events,
+                        statistics = EXCLUDED.statistics,
+                        ratings = EXCLUDED.ratings;
+                """
+                cur.execute(sql, (
+                    user_id, league_id, m['round'], m['home_team'], m['away_team'],
+                    m['home_goals'], m['away_goals'], 
+                    json.dumps(m['events']), json.dumps(m['statistics']), json.dumps(m['ratings'])
+                ))
+    conn.commit()
+
+
 
 def get_osm_credentials(conn, user_id):
     print(f"  - Obteniendo credenciales para el usuario ID: {user_id}...")
@@ -600,8 +631,10 @@ def run_update_for_user(user_id):
             print("\n[1/3] ?? Scraping en curso...")
             transfer_list_data, fichajes_data = get_market_data(page)
             standings_data, squad_values_data = get_league_data(page)
+            matches_data = get_match_results(page)
             
-            if any(d and isinstance(d, list) and d[0].get("error") for d in [transfer_list_data, fichajes_data, standings_data, squad_values_data]):
+            
+            if any(d and isinstance(d, list) and d[0].get("error") for d in [transfer_list_data, fichajes_data, standings_data, squad_values_data, matches_data]):
                 raise Exception("Error en uno de los scrapers.")
             
             if isinstance(standings_data, dict):
@@ -680,6 +713,9 @@ def run_update_for_user(user_id):
             list_data = next((i for i in transfer_list_data if i.get("league_name") == dash_name), None)
             if list_data:
                 sync_transfer_list(conn, list_data.get("players_on_sale"), league_id, user_id, scrape_timestamp)
+                
+        # F. ### NUEVO: Sincronizar Partidos (Matches)
+        sync_matches(conn, matches_data, dashboard_to_id_map, user_id)
 
         print("\n✨ Proceso finalizado correctamente.")
     finally:
