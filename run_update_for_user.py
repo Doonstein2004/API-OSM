@@ -636,7 +636,6 @@ def invalidate_user_credentials(conn, user_id):
             cur.execute("""
                 UPDATE users 
                 SET osm_username = NULL, 
-                    osm_password = NULL,
                     last_scrape_triggered_at = NULL 
                 WHERE id = %s
             """, (user_id,))
@@ -656,7 +655,9 @@ def run_update_for_user(user_id):
     if not conn: return
     
     try:
-        osm_username, osm_password = get_osm_credentials(conn, user_id)
+        #osm_username, osm_password = get_osm_credentials(conn, user_id)
+        osm_username = 'sfsdfsdf'
+        osm_password = 'sdfdsdsf'
         
         if not osm_username or not osm_password:
             print(f"⚠️ El usuario {osm_username} no tiene credenciales configuradas (o fueron borradas). Abortando.")
@@ -672,7 +673,7 @@ def run_update_for_user(user_id):
         
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=False)
             page = browser.new_page()
             
             try:
