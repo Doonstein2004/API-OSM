@@ -66,20 +66,24 @@ def get_match_results(page):
                 for j in range(row_count):
                     row = page.locator("table.table-sticky tbody tr.clickable").nth(j)
                     row.scroll_into_view_if_needed()
-                    
-                    # Info Básica
+                
+                    # --- 1. EXTRACCIÓN DE DATOS BÁSICOS (Incluido Mánagers) ---
+                    # Equipos
                     home_team = row.locator("td.td-home .font-sm").inner_text().strip()
-                    h_mgr_loc = row.locator("td.td-home .text-secondary")
-                    home_manager = h_mgr_loc.inner_text().strip() if h_mgr_loc.count() > 0 else "CPU"
-                    
-                    
                     away_team = row.locator("td.td-away .font-sm").inner_text().strip()
-                    a_mgr_loc = row.locator("td.td-away .text-secondary")
-                    away_manager = a_mgr_loc.inner_text().strip() if a_mgr_loc.count() > 0 else "CPU"
+                
+                    # Mánagers (Lógica robusta: Si no hay texto secundario, es CPU)
+                    # Local
+                    home_mgr_loc = row.locator("td.td-home .text-secondary")
+                    home_manager = home_mgr_loc.inner_text().strip() if home_mgr_loc.count() > 0 else "CPU"
+                
+                    # Visita
+                    away_mgr_loc = row.locator("td.td-away .text-secondary")
+                    away_manager = away_mgr_loc.inner_text().strip() if away_mgr_loc.count() > 0 else "CPU"
 
-                    print(f"    Processing: {home_team} vs {away_team}")
+                    print(f"    Processing: {home_team} ({home_manager}) vs {away_team} ({away_manager})")
 
-                    # 1. ABRIR MODAL
+                    # 2. ABRIR MODAL
                     row.click(force=True)
                     
                     try:
