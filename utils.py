@@ -13,6 +13,14 @@ def handle_popups(page):
     """
     # Lista de pop-ups a cerrar. Podemos añadir más aquí fácilmente en el futuro.
     # Cada diccionario contiene: el nombre (para logging), el selector del botón de cierre, y si requiere un clic forzado.
+    
+    try:
+        # Esperamos hasta 3 segundos a que se vaya el spinner
+        page.locator("#preloader-image").wait_for(state="detached", timeout=3000)
+    except:
+        pass # Si sigue ahí, intentaremos forzar los clics después
+    
+    
     popups_to_close = [
         {
             "name": "Pop-up de Recompensa",
@@ -35,6 +43,11 @@ def handle_popups(page):
             "selector": "div.modal-backdrop",
             "force": True,
             "action": "evaluate_remove" # Lógica especial para eliminarlo del DOM
+        },
+        { 
+            "name": "Generico",
+            "selector": "div.modal.in button.close",    
+            "force": True 
         }
     ]
 
@@ -53,6 +66,12 @@ def handle_popups(page):
             except PlaywrightError:
                 # Es normal que no encuentre nada, continuamos con el siguiente tipo de pop-up
                 continue
+        
+        try:
+            page.evaluate("""
+                document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+            """)
+        except: pass
         
         # Si en una pasada completa no cerramos nada, la página está limpia.
         if not popup_closed_in_this_pass:
@@ -98,6 +117,8 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
             
             for step in range(15):
                 current_url = page.url
+                
+                handle_popups(page)
                 
                 if SUCCESS_URLS_REGEX.search(current_url):
                     print("✅ ¡LOGIN EXITOSO! Dashboard detectado.")
