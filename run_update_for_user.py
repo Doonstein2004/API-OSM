@@ -661,6 +661,8 @@ def run_update_for_user(user_id):
             print(f"⚠️ El usuario {osm_username} no tiene credenciales configuradas (o fueron borradas). Abortando.")
             conn.close()
             return
+        else:
+            print(f"✅ Procediendo con el usuario {osm_username}")
     except Exception as e:
         print(f"? Error: {e}")
         conn.close()
