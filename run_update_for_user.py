@@ -566,31 +566,52 @@ def sync_league_details(conn, standings_data, squad_values_data, league_id_map, 
     
 
 def sync_matches(conn, matches_data, dashboard_to_id_map, user_id):
+    print("\n⚽ Sincronizando resultados de partidos...")
+    
     with conn.cursor() as cur:
         for league_info in matches_data:
+            # Obtenemos el ID real de la liga en la BD
             league_id = dashboard_to_id_map.get(league_info["league_name"])
             if not league_id: continue
 
             for m in league_info["matches"]:
                 sql = """
                     INSERT INTO public.matches (
-                        user_id, league_id, round, home_team, away_team, 
-                        home_goals, away_goals, events, statistics, ratings
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        user_id, league_id, round, 
+                        home_team, home_manager,    -- FALTABA ESTO
+                        away_team, away_manager,    -- FALTABA ESTO
+                        home_goals, away_goals, 
+                        events, statistics, ratings
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (league_id, round, home_team, away_team) 
                     DO UPDATE SET
+                        home_manager = EXCLUDED.home_manager, -- Actualizar si cambia (ej. renuncia)
+                        away_manager = EXCLUDED.away_manager, -- Actualizar si cambia
                         home_goals = EXCLUDED.home_goals,
                         away_goals = EXCLUDED.away_goals,
                         events = EXCLUDED.events,
                         statistics = EXCLUDED.statistics,
                         ratings = EXCLUDED.ratings;
                 """
+                
+                # Ejecutamos la consulta pasando los 12 valores
                 cur.execute(sql, (
-                    user_id, league_id, m['round'], m['home_team'], m['away_team'],
-                    m['home_goals'], m['away_goals'], 
-                    json.dumps(m['events']), json.dumps(m['statistics']), json.dumps(m['ratings'])
+                    user_id, 
+                    league_id, 
+                    m['round'], 
+                    m['home_team'], 
+                    m['home_manager'],  # <-- Pasamos el dato del scraper
+                    m['away_team'], 
+                    m['away_manager'],  # <-- Pasamos el dato del scraper
+                    m['home_goals'], 
+                    m['away_goals'], 
+                    json.dumps(m['events']), 
+                    json.dumps(m['statistics']), 
+                    json.dumps(m['ratings'])
                 ))
+    
     conn.commit()
+    print("✅ Partidos sincronizados correctamente.")
 
 
 
@@ -715,6 +736,7 @@ def run_update_for_user(user_id):
                 sync_transfer_list(conn, list_data.get("players_on_sale"), league_id, user_id, scrape_timestamp)
                 
         # F. ### NUEVO: Sincronizar Partidos (Matches)
+        print("\n📦 Sincronizando Resultados...")
         sync_matches(conn, matches_data, dashboard_to_id_map, user_id)
 
         print("\n✨ Proceso finalizado correctamente.")
