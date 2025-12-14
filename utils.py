@@ -1,6 +1,11 @@
 from playwright.sync_api import expect, Error as PlaywrightError, Page
 import time
 import os, re
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError
+
+# Definimos una excepción personalizada
+class InvalidCredentialsError(Exception):
+    pass
 
 def handle_popups(page):
     """
@@ -150,34 +155,46 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
                     time.sleep(1)
 
                     print("  - Haciendo clic en el botón de login...")
-                    # 4. Usamos `with page.expect_navigation()` que es la forma más
-                    #    fiable de manejar acciones que causan un cambio de página.
-                    with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
-                        login_button.click()
+                    login_button.click()
                     
                     print("  - Clic realizado y navegación detectada. Re-evaluando estado...")
-                    # El 'continue' nos llevará al inicio del bucle donde se comprobará la nueva URL.
-                    continue
-                # --- FIN DE LA SECCIÓN CORREGIDA ---
-                
-                print(f"  - [INFO] Estado no reconocido. Esperando...")
-                time.sleep(3)
+                    try:
+                        error_selector = ".feedbackcontainer .feedback-message"
+                        # Esperamos poco tiempo (3s) porque el error sale rápido
+                        page.wait_for_selector(error_selector, state="visible", timeout=5000)
+                        
+                        # Si llegamos aquí, el elemento es visible. Leemos el texto.
+                        error_text = page.locator(error_selector).inner_text()
+                        print(f"  ⚠️ DETECTADO MENSAJE DE ERROR: {error_text}")
+                        
+                        if "incorrect" in error_text.lower() or "can't log in" in error_text.lower():
+                            raise InvalidCredentialsError("Credenciales de OSM incorrectas.")
+                            
+                    except PlaywrightTimeoutError:
+                        # Si no aparece el error, asumimos que está cargando o navegando
+                        pass
 
-            raise PlaywrightTimeoutError("El bucle de estado interno no logró el login.")
+                    # B. Si no hubo error, esperamos navegación
+                    try:
+                        page.wait_for_url(SUCCESS_URLS_REGEX, timeout=10000)
+                        print("  - Navegación detectada tras click.")
+                        return True # Éxito directo
+                    except:
+                        pass # Seguimos en el bucle para re-evaluar
+                    
+                    continue
+                
+                time.sleep(2)
+
+        except InvalidCredentialsError as e:
+            # Re-lanzamos esta excepción específica para que el orquestador la capture
+            # y no reintentamos (no tiene sentido reintentar una contraseña errónea)
+            print(f"❌ LOGIN FALLIDO IRRECUPERABLE: {e}")
+            raise e 
 
         except Exception as e:
-            print(f"  - ❌ El intento maestro {attempt + 1} falló: {str(e).splitlines()[0]}")
-            try:
-                page.screenshot(path=f"login_error_master_attempt_{attempt + 1}.png")
-                print(f"    - Captura guardada: login_error_master_attempt_{attempt + 1}.png")
-            except: pass
-            
-            if attempt < max_retries - 1:
-                print("    - Esperando 20 segundos antes del próximo intento maestro...")
-                time.sleep(20)
-            else:
-                print("❌ ERROR DEFINITIVO: Se alcanzó el número máximo de reintentos de login.")
-                return False
+            print(f"  - ❌ El intento {attempt + 1} falló: {e}")
+            time.sleep(5)
                 
     return False
 

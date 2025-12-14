@@ -8,7 +8,7 @@ from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
-from utils import login_to_osm
+from utils import login_to_osm, InvalidCredentialsError 
 
 # --- Importar las funciones de los scrapers ---
 from scraper_league_details import get_league_data
@@ -623,6 +623,28 @@ def get_osm_credentials(conn, user_id):
         if not creds or not creds['osm_username'] or not creds['osm_password']:
             raise Exception("No se encontraron credenciales para este usuario.")
         return creds['osm_username'], creds['osm_password']
+    
+
+def invalidate_user_credentials(conn, user_id):
+    """
+    Borra las credenciales de la base de datos si son incorrectas
+    para evitar bloquear la cuenta o gastar recursos en futuros intentos.
+    """
+    print(f"⛔ CREDENCIALES INCORRECTAS DETECTADAS. Invalidando usuario {user_id}...")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE users 
+                SET osm_username = NULL, 
+                    osm_password = NULL,
+                    last_scrape_triggered_at = NULL 
+                WHERE id = %s
+            """, (user_id,))
+        conn.commit()
+        print("✅ Credenciales eliminadas de la BD. El usuario deberá ingresarlas nuevamente.")
+    except Exception as e:
+        print(f"❌ Error al invalidar credenciales: {e}")
+
 
 # --- ORQUESTADOR PRINCIPAL ---
 
@@ -632,22 +654,38 @@ def run_update_for_user(user_id):
     # 1. Obtener credenciales
     conn = get_db_connection()
     if not conn: return
+    
     try:
         osm_username, osm_password = get_osm_credentials(conn, user_id)
+        
+        if not osm_username or not osm_password:
+            print(f"⚠️ El usuario {osm_username} no tiene credenciales configuradas (o fueron borradas). Abortando.")
+            conn.close()
+            return
     except Exception as e:
         print(f"? Error: {e}")
-        return
-    finally:
         conn.close()
+        return
 
     # 2. Scraping
     try:
+        
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             page = browser.new_page()
-            if not login_to_osm(page, osm_username, osm_password):
-                raise Exception("Login fallido.")
+            
+            try:
+                login_success = login_to_osm(page, osm_username, osm_password)
+                if not login_success:
+                    raise Exception("Login fallido por timeout o error desconocido.")
+                
+            except InvalidCredentialsError:
+                # CAPTURAMOS EL ERROR ESPECÍFICO DE UTILS.PY
+                print("❌ ERROR FATAL: OSM rechazó el usuario/contraseña.")
+                invalidate_user_credentials(conn, user_id)
+                conn.close()
+                return # Salimos
 
             print("\n[1/3] ?? Scraping en curso...")
             transfer_list_data, fichajes_data = get_market_data(page)
