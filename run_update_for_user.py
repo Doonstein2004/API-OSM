@@ -655,9 +655,7 @@ def run_update_for_user(user_id):
     if not conn: return
     
     try:
-        #osm_username, osm_password = get_osm_credentials(conn, user_id)
-        osm_username = 'sfsdfsdf'
-        osm_password = 'sdfdsdsf'
+        osm_username, osm_password = get_osm_credentials(conn, user_id)
         
         if not osm_username or not osm_password:
             print(f"⚠️ El usuario {osm_username} no tiene credenciales configuradas (o fueron borradas). Abortando.")
@@ -673,7 +671,7 @@ def run_update_for_user(user_id):
         
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            browser = p.chromium.launch(headless=True)
             page = browser.new_page()
             
             try:
