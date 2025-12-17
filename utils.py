@@ -9,38 +9,32 @@ class InvalidCredentialsError(Exception):
 
 def handle_popups(page: Page):
     """
-    Versión optimizada: Elimina bloqueadores agresivamente mediante CSS y JS.
+    Versión v3.3: Especializada en matar modales sociales y bloqueos de transición.
     """
-    # 1. Inyectamos CSS para matar los bloqueadores conocidos de inmediato
+    # 1. Inyectamos CSS agresivo para ocultar elementos sociales y bloqueadores
+    # Añadido: .social-login-modal, #social-login-container, .facebook-login-button
     page.add_style_tag(content="""
-        #preloader-image, .modal-backdrop, #genericModalContainer { 
+        #preloader-image, .modal-backdrop, #genericModalContainer, 
+        .social-login-modal, #social-login-container, .facebook-login-button, 
+        iframe[src*="facebook"], #manager-social-login { 
             display: none !important; 
             visibility: hidden !important; 
             pointer-events: none !important; 
         }
     """)
     
-    # 2. Eliminación física del DOM (doble seguridad)
-    page.evaluate("""
-        document.querySelectorAll('#preloader-image, .modal-backdrop, #genericModalContainer').forEach(el => el.remove());
-    """)
-
-    popups_to_close = [
-        {"name": "Recompensa", "selector": "#consumable-reward-modal-content span.bold:has-text('View later')", "force": False},
-        {"name": "Anuncio", "selector": "#modal-dialog-centerpopup button.close", "force": True},
-        {"name": "Custom", "selector": "#customModalContainer .close, #customModalContainer button:has-text('Close')", "force": True}
-    ]
-
-    for _ in range(3): # Reducido a 3 pasadas para mayor velocidad
-        closed = False
-        for popup in popups_to_close:
-            try:
-                closer = page.locator(popup["selector"])
-                if closer.is_visible(timeout=300): # Timeout muy bajo
-                    closer.click(force=popup["force"], timeout=1000)
-                    closed = True
-            except: continue
-        if not closed: break
+    # 2. JS para cerrar activamente cualquier modal que use la clase 'in' (visible en Bootstrap)
+    # y eliminar el preloader si se quedó pegado.
+    try:
+        page.evaluate("""
+            document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
+                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss="modal"]');
+                if (closeBtn) closeBtn.click();
+                else modal.remove();
+            });
+            document.querySelectorAll('#preloader-image, .modal-backdrop').forEach(el => el.remove());
+        """)
+    except: pass
         
 
 def safe_int(value, default=0):
@@ -67,74 +61,106 @@ def parse_value_string(value_str):
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
 def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: int = 3):
-    print("🚀 Iniciando proceso de login ultra-robusto v3.2...")
+    print("🚀 Iniciando proceso de login ultra-robusto v3.3...")
     LOGIN_URL = "https://en.onlinesoccermanager.com/Login"
     SUCCESS_URLS_REGEX = re.compile(".*(/Career|/ChooseLeague)")
     
     for attempt in range(max_retries):
         try:
+            # Navegación inicial
+            print(f"--- Intento {attempt + 1}/{max_retries} ---")
             page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
             
-            for step in range(15):
-                handle_popups(page) # Limpiamos antes de cada acción
+            for step in range(20):
+                # Limpieza preventiva
+                handle_popups(page)
+                
                 current_url = page.url
+                # print(f"  - [Paso {step}] URL: {current_url}") # Descomentar para debug
 
                 if SUCCESS_URLS_REGEX.search(current_url):
                     print("✅ ¡LOGIN EXITOSO!")
                     return True
 
-                # --- ACCIÓN: BANNER COOKIES ---
-                try:
-                    cookie_btn = page.get_by_role("button", name=re.compile("Accept all|Agree|Consent|OK", re.IGNORECASE))
-                    if cookie_btn.is_visible(timeout=1000):
-                        cookie_btn.click(force=True)
-                except: pass
-
                 # --- ACCIÓN: PRIVACIDAD ---
                 if "PrivacyNotice" in current_url:
-                    page.get_by_role("button", name="Accept", exact=True).click(force=True)
-                    page.wait_for_load_state("networkidle", timeout=10000)
+                    print("  - [ACCIÓN] Aceptando privacidad...")
+                    accept_btn = page.get_by_role("button", name="Accept", exact=True)
+                    if accept_btn.is_visible():
+                        accept_btn.click(force=True)
+                        
+                        # --- CRÍTICO: EL BYPASS ---
+                        print("  - [ESTRATEGIA] Saltando trampa social. Navegando directo a Login...")
+                        time.sleep(1) # Esperamos 1s para que la cookie de privacidad se asiente
+                        page.goto(LOGIN_URL, wait_until="domcontentloaded")
                     continue
 
-                # --- ACCIÓN: CORREGIR REDIRECCIÓN A REGISTER ---
+                # --- ACCIÓN: TRAP DE REGISTRO / SOCIAL ---
+                # Si estamos en Register, el modal social nos ha atrapado
                 if "Register" in current_url:
-                    print("  - [ACCIÓN] En Register. Forzando navegación a Login...")
-                    # Aquí es donde fallaba: aplicamos force=True
-                    page.get_by_role("button", name="Log in", exact=True).click(force=True)
-                    time.sleep(1)
+                    print("  - [ACCIÓN] Atrapado en Register. Forzando escape a Login...")
+                    
+                    # Opción A: Intentar clic rápido si el botón es visible
+                    try:
+                        btn_login = page.get_by_role("button", name="Log in", exact=True)
+                        if btn_login.is_visible(timeout=1000):
+                            btn_login.click(force=True)
+                        else:
+                            # Opción B: Si el modal tapa el botón, recargamos la URL de Login
+                            raise Exception("Botón tapado")
+                    except:
+                        page.goto(LOGIN_URL, wait_until="domcontentloaded")
                     continue
 
-                # --- ACCIÓN: LOGIN FORM ---
+                # --- ACCIÓN: FORMULARIO DE LOGIN REAL ---
                 if "Login" in current_url:
-                    username_input = page.locator("#manager-name")
-                    password_input = page.locator("#password")
+                    # Usamos localizadores específicos con ID para ser precisos
+                    username_input = page.locator("input#manager-name")
+                    password_input = page.locator("input#password")
                     login_button = page.locator("button#login")
 
-                    username_input.wait_for(state="visible", timeout=10000)
-                    username_input.fill(osm_username)
-                    password_input.fill(osm_password)
-                    
-                    # Clic forzado para evitar el 'preloader-image' que detectó el log
-                    login_button.click(force=True) 
-                    
-                    # Verificación rápida de error de credenciales
+                    # Si por algún motivo el modal de Facebook está tapando el formulario:
+                    handle_popups(page)
+
                     try:
-                        error_selector = ".feedbackcontainer .feedback-message"
-                        if page.locator(error_selector).is_visible(timeout=3000):
-                            error_text = page.locator(error_selector).inner_text()
-                            if "incorrect" in error_text.lower():
+                        username_input.wait_for(state="visible", timeout=5000)
+                        
+                        # Usamos fill que es más rápido
+                        username_input.fill(osm_username)
+                        password_input.fill(osm_password)
+                        
+                        # Clic forzado
+                        login_button.click(force=True)
+                        
+                        # Esperamos a ver si hay error de credenciales
+                        error_msg = page.locator(".feedbackcontainer .feedback-message")
+                        # Damos un tiempo corto para ver si sale el error
+                        if error_msg.is_visible(timeout=3000):
+                            text = error_msg.inner_text().lower()
+                            if "incorrect" in text:
                                 raise InvalidCredentialsError("Credenciales incorrectas.")
-                    except PlaywrightTimeoutError: pass
-                    
-                    page.wait_for_url(SUCCESS_URLS_REGEX, timeout=10000)
+                        
+                        # Si no hay error, esperamos la navegación
+                        page.wait_for_url(SUCCESS_URLS_REGEX, timeout=10000)
+                        return True
+                        
+                    except PlaywrightTimeoutError:
+                        # Si falla el wait, es posible que estemos cargando, seguimos el loop
+                        pass
+                        
                     continue
-                
+
                 time.sleep(1)
 
         except InvalidCredentialsError as e:
+            # Error fatal, no reintentamos
+            print(f"❌ Error fatal de credenciales: {e}")
             raise e 
         except Exception as e:
             print(f"  - ❌ Intento {attempt + 1} falló: {e}")
+            # Si falla, limpiamos cookies para asegurar un intento limpio
+            try: page.context.clear_cookies()
+            except: pass
             time.sleep(2)
                 
     return False
