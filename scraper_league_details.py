@@ -1,4 +1,3 @@
-# scraper_league_data.py
 import os
 import time
 import json
@@ -8,16 +7,12 @@ from utils import handle_popups, safe_int
 
 load_dotenv()
 
-
 def get_league_data(page):
     """
     Extrae TANTO la clasificación general COMO los valores de equipo 
     para cada liga gestionada en un solo pase.
     
-    Retorna una tupla con dos listas separadas, manteniendo el formato
-    original que esperan las bases de datos:
-    - all_leagues_standings: igual que get_standings_data()
-    - all_leagues_squad_values: igual que get_squad_values_data()
+    CORREGIDO: Detecta equipos no 'clickable' (campeones/propios).
     """
     try:
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
@@ -33,7 +28,13 @@ def get_league_data(page):
             # Navegar de vuelta al dashboard si es necesario
             if page.url != MAIN_DASHBOARD_URL:
                 page.goto(MAIN_DASHBOARD_URL)
-            page.wait_for_selector(".career-teamslot", timeout=35000)
+            
+            try:
+                page.wait_for_selector(".career-teamslot", timeout=35000)
+            except:
+                print("No se encontraron slots de carrera. Posible error de carga.")
+                break
+
             handle_popups(page)
 
             slot = page.locator(".career-teamslot").nth(i)
@@ -63,40 +64,45 @@ def get_league_data(page):
                 page.wait_for_selector(standings_table_selector, timeout=40000)
                 
                 standings_list = []
-                rows = page.locator(f"{standings_table_selector} tbody tr.clickable")
+                
+                # --- CORRECCIÓN CLAVE ---
+                # Usamos 'tbody tr' en lugar de 'tbody tr.clickable' para no perder tu equipo
+                rows = page.locator(f"{standings_table_selector} tbody tr")
                 
                 for row in rows.all():
+                    if not row.is_visible(): continue
                     try:
+                        # Verificamos que sea una fila válida buscando la celda de ranking
+                        if row.locator("td.td-ranking").count() == 0: continue
+
                         position = row.locator("td.td-ranking").inner_text()
                         club_name = row.locator("span.ellipsis").inner_text()
+                        
                         manager_locator = row.locator("span.text-italic")
                         manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
-                        played = safe_int(row.locator("td").nth(4).inner_text())
-                        won = safe_int(row.locator("td").nth(6).inner_text())
-                        drew = safe_int(row.locator("td").nth(7).inner_text())
-                        lost = safe_int(row.locator("td").nth(8).inner_text())
-                        points = safe_int(row.locator("td").nth(9).inner_text())
-                        goals_for = safe_int(row.locator("td").nth(10).inner_text())
-                        goals_against = safe_int(row.locator("td").nth(12).inner_text())
-                        goal_difference = safe_int(row.locator("td.td-goaldifference").inner_text())
+                        
+                        # Usamos índices fijos para las columnas estadísticas
+                        cols = row.locator("td")
                         
                         standings_list.append({
                             "Position": safe_int(position),
                             "Club": club_name,
                             "Manager": manager_name,
-                            "Played": safe_int(played),
-                            "Won": safe_int(won),
-                            "Drew": safe_int(drew),
-                            "Lost": safe_int(lost),
-                            "Points": safe_int(points),
-                            "GoalsFor": safe_int(goals_for),
-                            "GoalsAgainst": safe_int(goals_against),
-                            "GoalDifference": safe_int(goal_difference)
+                            "Played": safe_int(cols.nth(4).inner_text()),
+                            "Won": safe_int(cols.nth(6).inner_text()),
+                            "Drew": safe_int(cols.nth(7).inner_text()),
+                            "Lost": safe_int(cols.nth(8).inner_text()),
+                            "Points": safe_int(cols.nth(9).inner_text()),
+                            "GoalsFor": safe_int(cols.nth(10).inner_text()),
+                            "GoalsAgainst": safe_int(cols.nth(12).inner_text()),
+                            "GoalDifference": safe_int(row.locator("td.td-goaldifference").inner_text())
                         })
                     except Exception as e:
-                        print(f"  - ADVERTENCIA: Saltando una fila en la tabla de clasificación. Error: {e}")
+                        # print(f"  - Saltando fila irrelevante o error menor: {e}")
                         continue
                 
+                # Ordenamos por si el DOM no estaba en orden
+                standings_list.sort(key=lambda x: x["Position"])
                 print(f"  ✓ Clasificación extraída: {len(standings_list)} equipos")
                 
                 # === PARTE 2: EXTRAER VALORES DE EQUIPO ===
@@ -107,30 +113,41 @@ def get_league_data(page):
                 squad_value_panel.wait_for(state="visible", timeout=40000)
                 
                 squad_values_list = []
-                rows = squad_value_panel.locator("tbody tr.clickable")
+                
+                # --- CORRECCIÓN CLAVE ---
+                # Igual aquí, quitamos .clickable
+                rows = squad_value_panel.locator("tbody tr")
                 
                 for row in rows.all():
+                    if not row.is_visible(): continue
                     try:
+                        if row.locator("td.td-ranking").count() == 0: continue
+
                         position = safe_int(row.locator("td.td-ranking").inner_text())
                         club_name = row.locator("span.ellipsis").inner_text()
+                        
+                        # MANTENEMOS EL CAMPO MANAGER QUE FALTABA EN LA VERSIÓN NUEVA
                         manager_locator = row.locator("span.text-italic")
                         manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
-                        squad_value = row.locator("td").nth(2).locator("span.club-funds-amount").inner_text()
-                        player_count = safe_int(row.locator("td").nth(3).inner_text())
-                        avg_value = row.locator("td").nth(4).locator("span.club-funds-amount").inner_text()
+                        
+                        cols = row.locator("td")
+                        
+                        squad_value = cols.nth(2).locator("span.club-funds-amount").inner_text()
+                        player_count = safe_int(cols.nth(3).inner_text())
+                        avg_value = cols.nth(4).locator("span.club-funds-amount").inner_text()
                         
                         squad_values_list.append({
-                            "Position": safe_int(position),
+                            "Position": position,
                             "Club": club_name,
-                            "Manager": manager_name,
+                            "Manager": manager_name,  # Restaurado
                             "Value": squad_value,
-                            "Players": safe_int(player_count),
+                            "Players": player_count,
                             "AverageValue": avg_value
                         })
                     except Exception as e:
-                        print(f"  - ADVERTENCIA: Saltando una fila en la tabla de valores. Error: {e}")
                         continue
                 
+                squad_values_list.sort(key=lambda x: x["Position"])
                 print(f"  ✓ Valores de equipo extraídos: {len(squad_values_list)} equipos")
                 
                 # === PARTE 3: AGREGAR A LAS LISTAS SEPARADAS (FORMATO ORIGINAL) ===
@@ -148,13 +165,12 @@ def get_league_data(page):
 
             except (TimeoutError, PlaywrightError) as e:
                 print(f"  ❌ ERROR al procesar datos para '{team_name}' en '{league_name}'. Saltando. Error: {e}")
-                # Intentar tomar captura para debugging
+                # Intentar tomar captura para debugging (MANTENIDO)
                 try:
                     page.screenshot(path=f"error_slot_{i+1}_{league_name.replace(' ', '_')}.png")
                     print(f"  📸 Captura guardada para debugging del slot {i+1}")
                 except:
                     pass
-                # Continuar con el siguiente slot en caso de error
                 continue
 
         print(f"\n✅ Proceso completado. Se extrajeron datos de {len(all_leagues_standings)} ligas.")
@@ -168,21 +184,6 @@ def get_league_data(page):
             print("📸 Captura de pantalla guardada en 'error_league_data_critical.png'.")
         except Exception as screenshot_error:
             print(f"No se pudo tomar la captura de pantalla. Error: {screenshot_error}")
-        # Retornar tupla con errores para mantener la estructura
+        
+        # MANTENIDO EL RETORNO DE ERRORES ORIGINAL
         return {"error": error_message}, {"error": error_message}
-
-
-if __name__ == "__main__":
-    print("=" * 70)
-    print("🧪 SCRAPER UNIFICADO DE DATOS DE LIGAS - MODO DE PRUEBA")
-    print("=" * 70)
-    print("\n⚠️  NOTA: Este es el modo de prueba independiente.")
-    print("    Para ejecutar realmente, necesitas:")
-    print("    1. Inicializar Playwright")
-    print("    2. Hacer login en OSM")
-    print("    3. Pasar la página logueada a get_league_data(page)")
-    print("\n📊 USO EN TU SCRIPT:")
-    print("    from scraper_league_data import get_league_data")
-    print("    standings_data, squad_values_data = get_league_data(page)")
-    print("\n✅ FORMATO 100% COMPATIBLE con las bases de datos existentes")
-    print("=" * 70)
