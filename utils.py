@@ -61,16 +61,17 @@ def parse_value_string(value_str):
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
 def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: int = 3):
-    print("🚀 Iniciando proceso de login ultra-robusto v3.4...")
+    print("🚀 Iniciando Login v3.5 (Optimizado para GitHub Actions)...")
     LOGIN_URL = "https://en.onlinesoccermanager.com/Login"
     SUCCESS_URLS_REGEX = re.compile(".*(/Career|/ChooseLeague)")
     
     for attempt in range(max_retries):
         print(f"\n--- Intento Maestro {attempt + 1}/{max_retries} ---")
         try:
+            # 1. Navegación con tiempo de espera generoso para GHA
             page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
             
-            for step in range(25):
+            for step in range(30): # Aumentamos pasos
                 handle_popups(page)
                 current_url = page.url
 
@@ -78,66 +79,72 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
                     print("✅ ¡LOGIN EXITOSO!")
                     return True
 
-                # --- ACCIÓN: PRIVACIDAD (CORREGIDO) ---
+                # --- CASO: PRIVACIDAD ---
                 if "PrivacyNotice" in current_url:
-                    print("  - [ACCIÓN] Detectada Privacidad. Intentando Aceptar...")
-                    accept_btn = page.get_by_role("button", name=re.compile("Accept|Agree|Aceptar", re.IGNORECASE))
-                    
-                    if accept_btn.is_visible(timeout=5000):
+                    print("  - [ACCIÓN] Aceptando privacidad...")
+                    # Buscamos el botón de forma más flexible
+                    accept_btn = page.get_by_role("button", name=re.compile("Accept|Agree|Aceptar|OK", re.IGNORECASE))
+                    if accept_btn.is_visible():
                         accept_btn.click(force=True)
-                        print("  - [INFO] Click en Accept realizado. Esperando redirección...")
-                        # Esperamos a que la URL cambie para salir del estado de Privacidad
-                        try:
-                            page.wait_for_url(lambda url: "PrivacyNotice" not in url, timeout=10000)
-                        except:
-                            page.goto(LOGIN_URL)
-                    else:
-                        # Si la URL dice privacidad pero no vemos el botón, forzamos login
-                        page.goto(LOGIN_URL)
+                        page.wait_for_timeout(2000) # Espera crucial para GHA
+                        page.goto(LOGIN_URL, wait_until="networkidle")
                     continue
 
-                # --- ACCIÓN: REGISTRO / TRAP SOCIAL ---
+                # --- CASO: REDIRECCIÓN A REGISTRO (EL ERROR QUE TIENES) ---
                 if "Register" in current_url:
-                    print("  - [ACCIÓN] En página de Registro. Forzando salto a Login...")
+                    print("  - [ALERTA] Caímos en Register. Forzando regreso a Login...")
                     page.goto(LOGIN_URL, wait_until="networkidle")
+                    page.wait_for_timeout(2000)
                     continue
 
-                # --- ACCIÓN: FORMULARIO DE LOGIN ---
+                # --- CASO: FORMULARIO DE LOGIN ---
                 if "Login" in current_url:
-                    # Esperamos a que los inputs existan realmente
                     username_input = page.locator("input#manager-name")
-                    if username_input.is_visible(timeout=5000):
-                        print("  - [INFO] Formulario visible. Rellenando...")
-                        username_input.fill(osm_username)
-                        page.locator("input#password").fill(osm_password)
+                    password_input = page.locator("input#password")
+                    
+                    if username_input.is_visible(timeout=10000):
+                        print(f"  - [INFO] Rellenando credenciales para: {osm_username}")
                         
-                        # Click en el botón de login
-                        page.locator("button#login").click(force=True)
+                        # Simulamos escritura humana con delay entre teclas
+                        username_input.fill("") # Limpiar
+                        username_input.type(osm_username, delay=100)
                         
-                        # Verificamos si hay error de credenciales
+                        password_input.fill("") # Limpiar
+                        password_input.type(osm_password, delay=100)
+                        
+                        page.wait_for_timeout(1000) # Pausa humana
+                        
+                        # ESTRATEGIA GHA: En lugar de click, usamos Enter en el campo password
+                        print("  - [ACCIÓN] Enviando formulario con tecla ENTER...")
+                        password_input.press("Enter")
+                        
+                        # Esperamos a ver qué pasa (Navegación o Error)
                         try:
-                            error_container = page.locator(".feedbackcontainer .feedback-message")
-                            if error_container.is_visible(timeout=3000):
-                                msg = error_container.inner_text().lower()
-                                if "incorrect" in msg or "can't log in" in msg:
-                                    raise InvalidCredentialsError(f"Error de OSM: {msg}")
+                            # Esperamos a que la URL cambie O aparezca un mensaje de error
+                            page.wait_for_function("""
+                                () => window.location.href.includes('Career') || 
+                                      window.location.href.includes('ChooseLeague') ||
+                                      document.querySelector('.feedback-message') !== null
+                            """, timeout=15000)
+                            
+                            # Si hay error de credenciales, lanzamos excepción
+                            error_msg = page.locator(".feedbackcontainer .feedback-message")
+                            if error_msg.is_visible(timeout=2000):
+                                raise InvalidCredentialsError(f"OSM dice: {error_msg.inner_text()}")
+                            
                         except PlaywrightTimeoutError:
-                            pass
-                        
-                        # Esperamos a que la URL cambie a una de éxito
-                        page.wait_for_url(SUCCESS_URLS_REGEX, timeout=15000)
-                        continue
-                
-                # Pequeña pausa de seguridad en cada paso para no saturar
-                time.sleep(1)
+                            print("  - [!] Timeout tras Enter. Re-evaluando URL...")
+                    continue
+
+                time.sleep(2) # Pausa entre pasos de bucle
 
         except InvalidCredentialsError as e:
-            print(f"❌ CREDENCIALES INVÁLIDAS: {e}")
+            print(f"❌ Error crítico: {e}")
             raise e
         except Exception as e:
-            print(f"  - ⚠️ Error en paso: {e}")
-            page.context.clear_cookies() # Limpiamos para el siguiente reintento
-            time.sleep(3)
+            print(f"  - ⚠️ Error en intento {attempt + 1}: {e}")
+            page.context.clear_cookies() # Limpiar rastro para el siguiente intento
+            page.wait_for_timeout(5000)
                 
     return False
 
