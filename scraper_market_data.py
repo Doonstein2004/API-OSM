@@ -5,14 +5,31 @@ from utils import handle_popups, safe_int
 
 def parse_price(price_text):
     if not isinstance(price_text, str): return 0
+    
     value_str = price_text.lower().strip().replace(',', '.')
-    if 'm' in value_str: return float(value_str.replace('m', ''))
-    if 'k' in value_str: return float(value_str.replace('k', '')) / 1000
-    try: return float(value_str)
-    except (ValueError, TypeError): return 0
+    
+    # Buscamos el multiplicador
+    if 'm' in value_str:
+        multiplier = 1.0  # Ya está en millones
+        value_str = value_str.replace('m', '')
+    elif 'k' in value_str:
+        multiplier = 0.001  # Mil a Millones (1/1000)
+        value_str = value_str.replace('k', '')
+    else:
+        # Si no tiene letra, asumimos que es el valor entero y lo pasamos a millones
+        multiplier = 0.000001 
+    
+    # Limpiar caracteres no numéricos
+    value_str = ''.join(filter(lambda x: x.isdigit() or x == '.', value_str))
+    
+    try:
+        # Devolvemos el valor en unidades de "Millón" con 2 decimales
+        return round(float(value_str) * multiplier, 2)
+    except:
+        return 0
 
 def get_market_data(page: Page):
-    print("\n--- Iniciando scraper unificado de mercado (V3 - Fix Visibilidad) ---")
+    print("\n--- Scraper de Mercado V8 (Data Context Extraction) ---")
     MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
     TRANSFERS_URL = "https://en.onlinesoccermanager.com/Transferlist"
     
@@ -22,200 +39,119 @@ def get_market_data(page: Page):
     try:
         NUM_SLOTS = 4
         for i in range(NUM_SLOTS):
-            print(f"\n--- Analizando Slot de Mercado #{i + 1} ---")
-            
+            print(f"\n--- Slot #{i + 1} ---")
             if not page.url.endswith("/Career"):
                 page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded")
             
             try:
-                page.locator(".career-teamslot").first.wait_for(state="visible", timeout=10000)
-            except TimeoutError:
-                print("No se encontraron slots de carrera visibles.")
-                break
+                page.wait_for_selector(".career-teamslot", timeout=10000)
+            except: break
 
             slot = page.locator(".career-teamslot").nth(i)
-
-            if slot.locator("h2.clubslot-main-title").count() == 0:
-                print("Slot vacío. Saltando.")
-                continue
+            if slot.locator("h2.clubslot-main-title").count() == 0: continue
 
             team_name = slot.locator("h2.clubslot-main-title").inner_text()
-            league_name_on_dashboard = slot.locator("h4.display-name").inner_text()
+            league_name = slot.locator("h4.display-name").inner_text()
+            print(f"Procesando: {team_name}")
             
-            MAX_RETRIES = 2
-            for attempt in range(MAX_RETRIES):
+            slot.click()
+            page.wait_for_selector("#timers", timeout=60000)
+            handle_popups(page)
+
+            page.goto(TRANSFERS_URL, wait_until="load")
+            handle_popups(page)
+
+            # --- EXTRACCIÓN MAGISTRAL ---
+            # En lugar de hacer clic, le pedimos a la página que nos de los datos de cada fila
+            print("  - Extrayendo datos de jugadores (sin abrir modales)...")
+            try:
+                table_selector = "#transfer-list table.table-sticky tbody tr.clickable"
+                page.wait_for_selector(table_selector, timeout=20000)
+                
+                # Esta función de JS se ejecuta en el navegador y extrae TODO de golpe
+                players_on_sale = page.evaluate("""
+                    () => {
+                        const rows = Array.from(document.querySelectorAll("#transfer-list table.table-sticky tbody tr.clickable"));
+                        return rows.map(row => {
+                            // Extraemos el contexto de Knockout vinculado a esta fila
+                            const data = ko.dataFor(row);
+                            if (!data || !data.playerPartial()) return null;
+                            
+                            const player = data.playerPartial();
+                            const team = data.teamPartial() ? data.teamPartial().name : "N/A";
+                            const manager = (data.teamPartial() && data.teamPartial().managerPartial()) 
+                                            ? data.teamPartial().managerPartial().name 
+                                            : "CPU";
+
+                            return {
+                                name: player.name,
+                                nationality: player.nationality ? player.nationality.name : "N/A",
+                                position: row.querySelectorAll("td")[2].innerText.trim(),
+                                age: player.age,
+                                seller_team: team,
+                                seller_manager: manager,
+                                attack: player.statAtt,
+                                defense: player.statDef,
+                                overall: player.statOvr,
+                                price: data.price, // Valor de venta
+                                value: player.value // ¡VALOR BASE DIRECTO SIN MODAL!
+                            };
+                        }).filter(p => p !== null);
+                    }
+                """)
+                
+                # Limpiamos los precios que vienen de JS (por si acaso)
+                for p in players_on_sale:
+                    p['price'] = round(float(p['price_raw']) / 1_000_000, 2)
+                    p['value'] = round(float(p['value_raw']) / 1_000_000, 2)
+                    
+                    
+                    del p['price_raw']
+                    del p['value_raw']
+
+                all_teams_transfer_list.append({
+                    "team_name": team_name, 
+                    "league_name": league_name, 
+                    "players_on_sale": players_on_sale
+                })
+                print(f"  ✓ {len(players_on_sale)} jugadores extraídos instantáneamente.")
+
+            except Exception as e:
+                print(f"  ⚠️ Error extrayendo mercado: {e}")
+
+            # --- HISTORIAL (Misma lógica de extracción rápida) ---
+            print("  - Historial...")
+            history_tab = page.locator("a[href='#transfer-history']")
+            if history_tab.is_visible():
+                history_tab.click()
                 try:
-                    print(f"Procesando: {team_name}...")
-                    
-                    with page.expect_navigation(wait_until="domcontentloaded", timeout=60000):
-                        slot.click()
-                    
-                    page.goto(TRANSFERS_URL, wait_until="load", timeout=90000)
-                    handle_popups(page)
+                    page.wait_for_selector("#transfer-history table.table", timeout=10000)
+                    # Cargar más un par de veces
+                    for _ in range(3):
+                        btn = page.locator('button:has-text("More transfers")')
+                        if btn.is_visible(timeout=500): 
+                            btn.click()
+                            time.sleep(0.5)
 
-                    # --- PARTE 1: JUGADORES EN VENTA ---
-                    print("  - Extrayendo lista de venta...")
-                    try:
-                        page.wait_for_selector("#transfer-list table.table-sticky", timeout=30000)
-                    except TimeoutError:
-                         print("  ⚠️ No se encontró la tabla. Posiblemente vacía.")
-                    
-                    players_on_sale = []
-                    # Selector más específico para evitar cabeceras
-                    rows = page.locator("#transfer-list table.table-sticky tbody tr.clickable")
-                    count = rows.count()
-                    print(f"  - Se encontraron {count} jugadores. Extrayendo valores...")
-
-                    for k in range(count):
-                        row = page.locator("#transfer-list table.table-sticky tbody tr.clickable").nth(k)
-                        
-                        try:
-                            # Extracción de datos básicos (sin abrir modal aún)
-                            name_el = row.locator("td").nth(0).locator("span.semi-bold")
-                            name = name_el.inner_text()
-                            pos = row.locator("td").nth(2).inner_text()
-                            age = safe_int(row.locator("td").nth(3).inner_text())
-                            
-                            # Equipo y Manager
-                            team_td = row.locator("td").nth(4)
-                            seller_team = team_td.inner_text()
-                            seller_manager = "CPU"
-                            mgr_span = team_td.locator("span.text-italic")
-                            if mgr_span.count() > 0:
-                                seller_manager = mgr_span.inner_text()
-                                seller_team = seller_team.replace(seller_manager, "").strip()
-
-                            att = safe_int(row.locator("td").nth(5).inner_text())
-                            def_ = safe_int(row.locator("td").nth(6).inner_text())
-                            ovr = safe_int(row.locator("td").nth(7).inner_text())
-                            price = parse_price(row.locator("td.td-price").inner_text())
-                            
-                            nat_loc = row.locator("td").nth(0).locator("span.flag-icon")
-                            nationality = nat_loc.get_attribute("title") if nat_loc.count() > 0 else "N/A"
-
-                            # --- CLICK PARA VALOR BASE ---
-                            row.scroll_into_view_if_needed()
-                            
-                            # Intentamos abrir el modal
-                            try:
-                                name_el.click(force=True, timeout=2000)
-                            except:
-                                row.click(force=True)
-                            
-                            # --- CORRECCIÓN CRÍTICA AQUÍ ---
-                            # Buscamos SOLO el contenedor que esté visible (:visible).
-                            # Esto ignora los modales "fantasma" de jugadores anteriores.
-                            val_locator = page.locator("div.player-profile-value:visible span[data-bind*='currency']").first
-                            
-                            try:
-                                val_locator.wait_for(state="visible", timeout=4000)
-                                value_text = val_locator.inner_text()
-                                base_value = parse_price(value_text)
-                            except TimeoutError:
-                                # Último intento: a veces el texto está pero no se detecta 'visible' por opacidad
-                                if val_locator.count() > 0:
-                                     base_value = parse_price(val_locator.inner_text())
-                                else:
-                                    print(f"    ⚠️ No se pudo leer valor base para {name}")
-                                    base_value = 0
-
-                            # Cerrar modal
-                            close_btn = page.locator("div.close-large[aria-label='Close']").first
-                            if close_btn.is_visible():
-                                close_btn.click()
-                            else:
-                                page.keyboard.press("Escape")
-                            
-                            # Esperar brevemente que la UI reaccione
-                            page.wait_for_timeout(300) 
-
-                            players_on_sale.append({
-                                "name": name,
-                                "nationality": nationality,
-                                "position": pos,
-                                "age": age,
-                                "seller_team": seller_team,
-                                "seller_manager": seller_manager,
-                                "attack": att,
-                                "defense": def_,
-                                "overall": ovr,
-                                "price": price,
-                                "value": base_value 
-                            })
-
-                        except Exception as e:
-                            # print(f"    ⚠️ Error fila {k}: {e}")
-                            page.keyboard.press("Escape")
-                            continue
-
-                    all_teams_transfer_list.append({
-                        "team_name": team_name, 
-                        "league_name": league_name_on_dashboard, 
-                        "players_on_sale": players_on_sale
+                    hist_list = page.evaluate("""() => {
+                        const rows = Array.from(document.querySelectorAll("#transfer-history table.table tbody tr"));
+                        return rows.map(r => {
+                            const c = r.querySelectorAll("td");
+                            if(c.length < 8) return null;
+                            return {
+                                Name: c[0].innerText.trim(), From: c[1].innerText.trim(),
+                                To: c[2].innerText.trim(), Position: c[3].innerText.trim(),
+                                Gameweek: c[4].innerText.trim(), Value: c[5].innerText.trim(),
+                                Price: c[6].innerText.trim(), Date: c[7].innerText.trim()
+                            };
+                        }).filter(x => x);
+                    }""")
+                    all_teams_transfer_history.append({
+                        "team_name": team_name, "league_name": league_name, "transfers": hist_list
                     })
-                    print(f"  ✓ {len(players_on_sale)} jugadores procesados.")
-
-                    # --- PARTE 2: HISTORIAL ---
-                    print("  - Extrayendo historial...")
-                    page.evaluate("window.scrollTo(0, 0)")
-                    
-                    history_tab = page.locator("a[href='#transfer-history']")
-                    if history_tab.is_visible():
-                        history_tab.click()
-                        
-                        try:
-                            expect(page.locator("#transfer-history table.table")).to_be_visible(timeout=10000)
-                        except:
-                            print("  ⚠️ Tabla de historial no cargó.")
-                        
-                        # Cargar más
-                        more_btn = page.locator('button:has-text("More transfers")')
-                        clicks = 0
-                        while more_btn.is_visible(timeout=2000) and clicks < 20:
-                            try:
-                                more_btn.click()
-                                time.sleep(0.5) 
-                                clicks += 1
-                            except:
-                                break
-                        
-                        transfers_list = page.evaluate("""
-                            () => {
-                                const rows = Array.from(document.querySelectorAll("#transfer-history table.table tbody tr"));
-                                return rows.map(row => {
-                                    const tds = row.querySelectorAll("td");
-                                    if (tds.length < 8) return null;
-                                    return {
-                                        Name: tds[0].innerText.trim(), 
-                                        From: tds[1].innerText.trim(),
-                                        To: tds[2].innerText.trim(), 
-                                        Position: tds[3].innerText.trim(),
-                                        Gameweek: tds[4].innerText.trim(), 
-                                        Value: tds[5].innerText.trim(),
-                                        Price: tds[6].innerText.trim(), 
-                                        Date: tds[7].innerText.trim()
-                                    };
-                                }).filter(t => t !== null);
-                            }
-                        """)
-                        
-                        all_teams_transfer_history.append({
-                            "team_name": team_name, 
-                            "league_name": league_name_on_dashboard, 
-                            "transfers": transfers_list
-                        })
-                        print(f"  ✓ {len(transfers_list)} fichajes en historial.")
-                    else:
-                        print("  ⚠️ Pestaña historial no visible.")
-
-                    break 
-
-                except Exception as e:
-                    print(f"  ❌ Error intento {attempt+1}: {e}")
-                    page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded")
-            
-        return all_teams_transfer_list, all_teams_transfer_history
+                except: pass
 
     except Exception as e:
-        print(f"❌ Error crítico en get_market_data: {e}")
-        return [], []
+        print(f"❌ Error crítico mercado: {e}")
+
+    return all_teams_transfer_list, all_teams_transfer_history
