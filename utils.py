@@ -61,107 +61,83 @@ def parse_value_string(value_str):
 
 # --- NUEVA FUNCIÓN DE LOGIN CENTRALIZADA ---
 def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: int = 3):
-    print("🚀 Iniciando proceso de login ultra-robusto v3.3...")
+    print("🚀 Iniciando proceso de login ultra-robusto v3.4...")
     LOGIN_URL = "https://en.onlinesoccermanager.com/Login"
     SUCCESS_URLS_REGEX = re.compile(".*(/Career|/ChooseLeague)")
     
     for attempt in range(max_retries):
+        print(f"\n--- Intento Maestro {attempt + 1}/{max_retries} ---")
         try:
-            # Navegación inicial
-            print(f"--- Intento {attempt + 1}/{max_retries} ---")
-            page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=60000)
+            page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
             
-            for step in range(20):
-                # Limpieza preventiva
+            for step in range(25):
                 handle_popups(page)
-                
                 current_url = page.url
-                # print(f"  - [Paso {step}] URL: {current_url}") # Descomentar para debug
 
                 if SUCCESS_URLS_REGEX.search(current_url):
                     print("✅ ¡LOGIN EXITOSO!")
                     return True
 
-                # --- ACCIÓN: PRIVACIDAD ---
+                # --- ACCIÓN: PRIVACIDAD (CORREGIDO) ---
                 if "PrivacyNotice" in current_url:
-                    print("  - [ACCIÓN] Aceptando privacidad...")
-                    accept_btn = page.get_by_role("button", name="Accept", exact=True)
-                    if accept_btn.is_visible():
-                        accept_btn.click(force=True)
-                        
-                        # --- CRÍTICO: EL BYPASS ---
-                        print("  - [ESTRATEGIA] Saltando trampa social. Navegando directo a Login...")
-                        time.sleep(1) # Esperamos 1s para que la cookie de privacidad se asiente
-                        page.goto(LOGIN_URL, wait_until="domcontentloaded")
-                    continue
-
-                # --- ACCIÓN: TRAP DE REGISTRO / SOCIAL ---
-                # Si estamos en Register, el modal social nos ha atrapado
-                if "Register" in current_url:
-                    print("  - [ACCIÓN] Atrapado en Register. Forzando escape a Login...")
+                    print("  - [ACCIÓN] Detectada Privacidad. Intentando Aceptar...")
+                    accept_btn = page.get_by_role("button", name=re.compile("Accept|Agree|Aceptar", re.IGNORECASE))
                     
-                    # Opción A: Intentar clic rápido si el botón es visible
-                    try:
-                        btn_login = page.get_by_role("button", name="Log in", exact=True)
-                        if btn_login.is_visible(timeout=1000):
-                            btn_login.click(force=True)
-                        else:
-                            # Opción B: Si el modal tapa el botón, recargamos la URL de Login
-                            raise Exception("Botón tapado")
-                    except:
-                        page.goto(LOGIN_URL, wait_until="domcontentloaded")
+                    if accept_btn.is_visible(timeout=5000):
+                        accept_btn.click(force=True)
+                        print("  - [INFO] Click en Accept realizado. Esperando redirección...")
+                        # Esperamos a que la URL cambie para salir del estado de Privacidad
+                        try:
+                            page.wait_for_url(lambda url: "PrivacyNotice" not in url, timeout=10000)
+                        except:
+                            page.goto(LOGIN_URL)
+                    else:
+                        # Si la URL dice privacidad pero no vemos el botón, forzamos login
+                        page.goto(LOGIN_URL)
                     continue
 
-                # --- ACCIÓN: FORMULARIO DE LOGIN REAL ---
+                # --- ACCIÓN: REGISTRO / TRAP SOCIAL ---
+                if "Register" in current_url:
+                    print("  - [ACCIÓN] En página de Registro. Forzando salto a Login...")
+                    page.goto(LOGIN_URL, wait_until="networkidle")
+                    continue
+
+                # --- ACCIÓN: FORMULARIO DE LOGIN ---
                 if "Login" in current_url:
-                    # Usamos localizadores específicos con ID para ser precisos
+                    # Esperamos a que los inputs existan realmente
                     username_input = page.locator("input#manager-name")
-                    password_input = page.locator("input#password")
-                    login_button = page.locator("button#login")
-
-                    # Si por algún motivo el modal de Facebook está tapando el formulario:
-                    handle_popups(page)
-
-                    try:
-                        username_input.wait_for(state="visible", timeout=5000)
-                        
-                        # Usamos fill que es más rápido
+                    if username_input.is_visible(timeout=5000):
+                        print("  - [INFO] Formulario visible. Rellenando...")
                         username_input.fill(osm_username)
-                        password_input.fill(osm_password)
+                        page.locator("input#password").fill(osm_password)
                         
-                        # Clic forzado
-                        login_button.click(force=True)
+                        # Click en el botón de login
+                        page.locator("button#login").click(force=True)
                         
-                        # Esperamos a ver si hay error de credenciales
-                        error_msg = page.locator(".feedbackcontainer .feedback-message")
-                        # Damos un tiempo corto para ver si sale el error
-                        if error_msg.is_visible(timeout=3000):
-                            text = error_msg.inner_text().lower()
-                            if "incorrect" in text:
-                                raise InvalidCredentialsError("Credenciales incorrectas.")
+                        # Verificamos si hay error de credenciales
+                        try:
+                            error_container = page.locator(".feedbackcontainer .feedback-message")
+                            if error_container.is_visible(timeout=3000):
+                                msg = error_container.inner_text().lower()
+                                if "incorrect" in msg or "can't log in" in msg:
+                                    raise InvalidCredentialsError(f"Error de OSM: {msg}")
+                        except PlaywrightTimeoutError:
+                            pass
                         
-                        # Si no hay error, esperamos la navegación
-                        page.wait_for_url(SUCCESS_URLS_REGEX, timeout=10000)
-                        return True
-                        
-                    except PlaywrightTimeoutError:
-                        # Si falla el wait, es posible que estemos cargando, seguimos el loop
-                        pass
-                        
-                    continue
-
+                        # Esperamos a que la URL cambie a una de éxito
+                        page.wait_for_url(SUCCESS_URLS_REGEX, timeout=15000)
+                        continue
+                
+                # Pequeña pausa de seguridad en cada paso para no saturar
                 time.sleep(1)
 
         except InvalidCredentialsError as e:
-            # Error fatal, no reintentamos
-            print(f"❌ Error fatal de credenciales: {e}")
-            raise e 
+            print(f"❌ CREDENCIALES INVÁLIDAS: {e}")
+            raise e
         except Exception as e:
-            print(f"  - ❌ Intento {attempt + 1} falló: {e}")
-            # Si falla, limpiamos cookies para asegurar un intento limpio
-            try: page.context.clear_cookies()
-            except: pass
-            time.sleep(2)
+            print(f"  - ⚠️ Error en paso: {e}")
+            page.context.clear_cookies() # Limpiamos para el siguiente reintento
+            time.sleep(3)
                 
     return False
 
