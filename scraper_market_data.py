@@ -29,7 +29,7 @@ def parse_price(price_text):
         return 0
 
 def get_market_data(page: Page):
-    print("\n--- Scraper de Mercado V8 (Data Context Extraction) ---")
+    print("\n--- Scraper de Mercado V10 (Robust Extraction) ---")
     MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
     TRANSFERS_URL = "https://en.onlinesoccermanager.com/Transferlist"
     
@@ -61,60 +61,91 @@ def get_market_data(page: Page):
             page.goto(TRANSFERS_URL, wait_until="load")
             handle_popups(page)
 
-            # --- EXTRACCIÓN MAGISTRAL ---
-            # En lugar de hacer clic, le pedimos a la página que nos de los datos de cada fila
-            print("  - Extrayendo datos de jugadores (sin abrir modales)...")
+            # --- EXTRACCIÓN CON FALLBACK ---
+            print("  - Extrayendo datos de jugadores...")
             try:
                 table_selector = "#transfer-list table.table-sticky tbody tr.clickable"
                 page.wait_for_selector(table_selector, timeout=20000)
                 
-                # Esta función de JS se ejecuta en el navegador y extrae TODO de golpe
-                players_on_sale = page.evaluate("""
+                # JS mejorado para encontrar los datos sin importar la estructura exacta
+                players_on_sale_raw = page.evaluate("""
                     () => {
                         const rows = Array.from(document.querySelectorAll("#transfer-list table.table-sticky tbody tr.clickable"));
                         return rows.map(row => {
-                            // Extraemos el contexto de Knockout vinculado a esta fila
                             const data = ko.dataFor(row);
-                            if (!data || !data.playerPartial()) return null;
+                            if (!data) return null;
                             
-                            const player = data.playerPartial();
-                            const team = data.teamPartial() ? data.teamPartial().name : "N/A";
-                            const manager = (data.teamPartial() && data.teamPartial().managerPartial()) 
-                                            ? data.teamPartial().managerPartial().name 
-                                            : "CPU";
+                            const player = data.playerPartial ? data.playerPartial() : null;
+                            if (!player) return null;
+                            
+                            const cols = row.querySelectorAll("td");
+                            
+                            // FALLBACK PARA EL PRECIO: 
+                            // 1. Intentamos data.price (observable)
+                            // 2. Intentamos leer el texto de la última columna
+                            let price = 0;
+                            if (typeof data.price === 'function') price = data.price();
+                            else if (data.price) price = data.price;
+                            else {
+                                const priceText = cols[cols.length - 1].innerText;
+                                price = priceText.replace(/[^0-9.]/g, ''); // Limpieza básica
+                            }
 
                             return {
-                                name: player.name,
-                                nationality: player.nationality ? player.nationality.name : "N/A",
-                                position: row.querySelectorAll("td")[2].innerText.trim(),
-                                age: player.age,
-                                seller_team: team,
-                                seller_manager: manager,
-                                attack: player.statAtt,
-                                defense: player.statDef,
-                                overall: player.statOvr,
-                                price: data.price, // Valor de venta
-                                value: player.value // ¡VALOR BASE DIRECTO SIN MODAL!
+                                name: player.name || "N/A",
+                                nationality: (player.nationality && player.nationality.name) ? player.nationality.name : "N/A",
+                                position: cols[2] ? cols[2].innerText.trim() : "N/A",
+                                age: player.age || 0,
+                                seller_team: data.teamPartial ? data.teamPartial().name : "CPU",
+                                seller_manager: (data.teamPartial && data.teamPartial().managerPartial()) 
+                                                ? data.teamPartial().managerPartial().name 
+                                                : "CPU",
+                                attack: player.statAtt || 0,
+                                defense: player.statDef || 0,
+                                overall: player.statOvr || 0,
+                                price_val: price,
+                                value_val: player.value || 0
                             };
                         }).filter(p => p !== null);
                     }
                 """)
                 
-                # Limpiamos los precios que vienen de JS (por si acaso)
-                for p in players_on_sale:
-                    p['price'] = round(float(p['price_raw']) / 1_000_000, 2)
-                    p['value'] = round(float(p['value_raw']) / 1_000_000, 2)
-                    
-                    
-                    del p['price_raw']
-                    del p['value_raw']
+                # Procesamiento en Python (Millones)
+                players_on_sale = []
+                for p in players_on_sale_raw:
+                    try:
+                        # Limpiamos y convertimos a millones
+                        # Si price_val ya es un número grande (ej 78600000), dividimos
+                        # Si es un string como "78.6", lo tratamos como tal
+                        raw_p = str(p.get('price_val', 0)).lower()
+                        raw_v = str(p.get('value_val', 0)).lower()
+                        
+                        def to_million(val_str):
+                            clean = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == ',', val_str)).replace(',', '.')
+                            if not clean: return 0.0
+                            num = float(clean)
+                            # Si el número es mayor a 10000, asumimos que viene en unidades completas (ej. 15000000)
+                            if num > 10000: return round(num / 1_000_000, 2)
+                            return round(num, 2)
+
+                        p['price'] = to_million(raw_p)
+                        p['value'] = to_million(raw_v)
+                        
+                        # Debug preventivo
+                        # print(f"    [CHECK] {p['name']}: {p['price']}M | {p['value']}M")
+                        
+                        # Limpiar campos temporales
+                        del p['price_val']
+                        del p['value_val']
+                        players_on_sale.append(p)
+                    except: continue
 
                 all_teams_transfer_list.append({
                     "team_name": team_name, 
                     "league_name": league_name, 
                     "players_on_sale": players_on_sale
                 })
-                print(f"  ✓ {len(players_on_sale)} jugadores extraídos instantáneamente.")
+                print(f"  ✓ {len(players_on_sale)} jugadores extraídos.")
 
             except Exception as e:
                 print(f"  ⚠️ Error extrayendo mercado: {e}")
