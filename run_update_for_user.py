@@ -673,12 +673,33 @@ def run_update_for_user(user_id):
         
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
+            is_gha = os.getenv("GITHUB_ACTIONS") == "true"
+            browser = p.chromium.launch(
+                headless=True if is_gha else False,
+                args=[
+                    "--disable-blink-features=AutomationControlled", # Oculta rastro bot
+                    "--no-sandbox", 
+                    "--disable-setuid-sandbox"
+                ]
+            )
+            
+            # CREAMOS UN CONTEXTO "HUMANO"
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 720},
+                locale="es-ES",
+                timezone_id="Europe/Madrid"
+            )
+            
+            page = context.new_page()
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            """)
             
             try:
                 login_success = login_to_osm(page, osm_username, osm_password)
                 if not login_success:
+                    page.screenshot(path="debug_login_fail.png")
                     raise Exception("Login fallido por timeout o error desconocido.")
                 
             except InvalidCredentialsError:

@@ -118,6 +118,8 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
                         print("  - [ACCIÓN] Enviando formulario con tecla ENTER...")
                         password_input.press("Enter")
                         
+                        time.sleep(3)
+                        
                         # Esperamos a ver qué pasa (Navegación o Error)
                         try:
                             # Esperamos a que la URL cambie O aparezca un mensaje de error
