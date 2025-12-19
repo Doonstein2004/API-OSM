@@ -4,6 +4,7 @@ import sys
 import os
 import psycopg2
 import psycopg2.extras
+import time
 from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
@@ -29,16 +30,31 @@ DB_CONFIG = {
 
 # --- FUNCIONES AUXILIARES ---
 
-def get_db_connection():
-    """Establece y devuelve una conexión a la base de datos."""
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        conn.cursor_factory = psycopg2.extras.DictCursor
-        print("? Conexión con PostgreSQL establecida.")
-        return conn
-    except psycopg2.OperationalError as e:
-        print(f"? ERROR: No se pudo conectar a PostgreSQL. Revisa tus credenciales en .env y que la BD esté en ejecución. Error: {e}")
-        return None
+def get_db_connection(max_retries=3):
+    """
+    Establece conexión a PostgreSQL con Keepalives y reintentos.
+    """
+    # Configuración para evitar que la conexión muera por inactividad
+    conn_args = {
+        **DB_CONFIG,
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5
+    }
+
+    for attempt in range(max_retries):
+        try:
+            conn = psycopg2.connect(**conn_args)
+            conn.cursor_factory = psycopg2.extras.DictCursor
+            return conn
+        except psycopg2.OperationalError as e:
+            print(f"⚠️ Error conectando a DB (Intento {attempt+1}/{max_retries}): {e}")
+            time.sleep(5)
+    
+    print("❌ Error Fatal: No se pudo conectar a la base de datos tras varios intentos.")
+    return None
+
 
 def parse_value_string(value_str):
     if not isinstance(value_str, str): return 0
@@ -727,81 +743,105 @@ def run_update_for_user(user_id):
         return
 
     # 3. Sincronización
-    print("\n[2/3] ?? Sincronizando BD...")
-    conn = get_db_connection()
-    if not conn: return
+    print("\n[2/3] 💾 Sincronizando BD...")
     
-    try:
-        # A. Mapeo de ligas
-        all_leagues_data_from_db = get_leagues_for_mapping(conn)
-        
-        # AHORA OBTENEMOS TAMBIÉN EL MAPA EQUIPO->DASHBOARD
-        team_to_dashboard_map, dashboard_to_official_map = resolve_active_leagues(
-            fichajes_data, all_leagues_data_from_db, standings_data, LEAGUES_TO_IGNORE
-        )
-        
-        if not dashboard_to_official_map:
-            print("ℹ️ No hay ligas activas con datos para procesar.")
-            return
+    max_sync_retries = 3
+    
+    for attempt in range(max_sync_retries):
+        conn = None
+        try:
+            # Intentamos abrir una conexión FRESCA
+            conn = get_db_connection()
+            if not conn:
+                raise Exception("No se pudo establecer conexión para sincronizar.")
 
-        print(f"  - Ligas detectadas en dashboard: {list(dashboard_to_official_map.keys())}")
+            # --- A. Mapeo de ligas ---
+            all_leagues_data_from_db = get_leagues_for_mapping(conn)
+            
+            # Resolvemos ligas activas
+            team_to_dashboard_map, dashboard_to_official_map = resolve_active_leagues(
+                fichajes_data, all_leagues_data_from_db, standings_data, LEAGUES_TO_IGNORE
+            )
+            
+            if not dashboard_to_official_map:
+                print("ℹ️ No hay ligas activas con datos para procesar.")
+                return # Salimos si no hay nada que hacer
 
-        # B. Obtener IDs (Usando el mapa de Dashboards)
-        # IMPORTANTE: Pasamos dashboard_to_official_map
-        dashboard_to_id_map = sync_leagues_smart(
-            conn, 
-            dashboard_to_official_map,  # <-- CAMBIO
-            all_leagues_data_from_db, 
-            user_id, 
-            standings_data
-        )
-        
-        # C. Sincronizar Detalles (Usando el ID correcto para cada Dashboard Name)
-        print("\n🔄 Sincronizando detalles...")
-        with conn.cursor() as cur:
+            print(f"  - Ligas detectadas: {list(dashboard_to_official_map.keys())}")
+
+            # --- B. Obtener IDs y Sincronizar Estructura ---
+            dashboard_to_id_map = sync_leagues_smart(
+                conn, 
+                dashboard_to_official_map, 
+                all_leagues_data_from_db, 
+                user_id, 
+                standings_data
+            )
+            
+            # --- C. Sincronizar Detalles ---
+            # (Puedes volver a poner la llamada a sync_league_details aquí si la tienes externalizada,
+            #  o el bloque de código directo).
+            print("\n🔄 Sincronizando detalles...")
+            with conn.cursor() as cur:
+                for dash_name, league_id in dashboard_to_id_map.items():
+                    if not league_id: continue
+                    
+                    ls_data = next((ls for ls in standings_data if ls.get("league_name") == dash_name), None)
+                    lv_data = next((lv for lv in squad_values_data if lv.get("league_name") == dash_name), None)
+                    
+                    managers, standings, squad_vals = {}, [], []
+                    
+                    if ls_data:
+                        standings = ls_data.get("standings", [])
+                        for team in standings:
+                            if team.get("Manager") and team.get("Manager") != "N/A": 
+                                managers[team["Club"]] = team["Manager"]
+                    if lv_data:
+                        squad_vals = lv_data.get("squad_values_ranking", [])
+
+                    sql = """
+                        UPDATE user_leagues 
+                        SET standings = %s, squad_values = %s, managers_by_team = %s
+                        WHERE user_id = %s AND league_id = %s
+                    """
+                    cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(managers), user_id, league_id))
+            conn.commit()
+
+            # --- D. Sincronizar Fichajes ---
+            grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_dashboard_map)
+            upload_data_to_postgres(conn, grouped_transfers, dashboard_to_id_map, user_id)
+            
+            # --- E. Sincronizar Mercado ---
+            print("\n📦 Sincronizando Mercado...")
             for dash_name, league_id in dashboard_to_id_map.items():
-                if not league_id: continue
-                
-                # Buscar datos scrapeados específicos para ESTE dashboard name
-                ls_data = next((ls for ls in standings_data if ls.get("league_name") == dash_name), None)
-                lv_data = next((lv for lv in squad_values_data if lv.get("league_name") == dash_name), None)
-                
-                managers, standings, squad_vals = {}, [], []
-                
-                if ls_data:
-                    standings = ls_data.get("standings", [])
-                    for team in standings:
-                        if team.get("Manager") and team.get("Manager") != "N/A": 
-                            managers[team["Club"]] = team["Manager"]
-                if lv_data:
-                    squad_vals = lv_data.get("squad_values_ranking", [])
+                list_data = next((i for i in transfer_list_data if i.get("league_name") == dash_name), None)
+                if list_data:
+                    sync_transfer_list(conn, list_data.get("players_on_sale"), league_id, user_id, scrape_timestamp)
+                    
+            # --- F. Sincronizar Partidos ---
+            # Solo si matches_data no es None (por si el scraper falló parcialmente)
+            if matches_data: 
+                sync_matches(conn, matches_data, dashboard_to_id_map, user_id)
 
-                sql = """
-                    UPDATE user_leagues 
-                    SET standings = %s, squad_values = %s, managers_by_team = %s
-                    WHERE user_id = %s AND league_id = %s
-                """
-                cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(managers), user_id, league_id))
-        conn.commit()
+            print("\n✨ Proceso finalizado correctamente.")
+            break # SI TODO SALIÓ BIEN, ROMPEMOS EL BUCLE DE REINTENTOS
 
-        # D. Sincronizar Fichajes (Agrupados por Dashboard Name)
-        grouped_transfers = translate_and_group_transfers(fichajes_data, team_to_dashboard_map)
-        upload_data_to_postgres(conn, grouped_transfers, dashboard_to_id_map, user_id)
-        
-        # E. Sincronizar Mercado
-        print("\n📦 Sincronizando Mercado...")
-        for dash_name, league_id in dashboard_to_id_map.items():
-            list_data = next((i for i in transfer_list_data if i.get("league_name") == dash_name), None)
-            if list_data:
-                sync_transfer_list(conn, list_data.get("players_on_sale"), league_id, user_id, scrape_timestamp)
-                
-        # F. ### NUEVO: Sincronizar Partidos (Matches)
-        print("\n📦 Sincronizando Resultados...")
-        sync_matches(conn, matches_data, dashboard_to_id_map, user_id)
-
-        print("\n✨ Proceso finalizado correctamente.")
-    finally:
-        if conn: conn.close()
+        except psycopg2.OperationalError as e:
+            print(f"\n⚠️ ERROR DE CONEXIÓN (Intento {attempt + 1}/{max_sync_retries}): {e}")
+            print("   ⏳ Esperando 10 segundos antes de reintentar sincronización...")
+            if conn:
+                try: conn.close()
+                except: pass
+            time.sleep(10) # Espera antes de reintentar
+            
+        except Exception as e:
+            print(f"\n❌ Error CRÍTICO no recuperable durante la sincronización: {e}")
+            import traceback
+            traceback.print_exc()
+            break # Errores de lógica no se reintentan, solo de conexión
+            
+        finally:
+            if conn and not conn.closed: conn.close()
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
