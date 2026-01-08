@@ -1,3 +1,4 @@
+# notifications.py
 import firebase_admin
 from firebase_admin import credentials, messaging
 import os
@@ -23,8 +24,18 @@ def send_push(token, title, body):
         print("⚠️ No hay token FCM para enviar notificación.")
         return
     try:
+        android_config = messaging.AndroidConfig(
+            priority='high',
+            notification=messaging.AndroidNotification(
+                icon='ic_notification',  # El nombre del archivo en res/drawable (sin extensión)
+                color='#22D3EE',         # Tu color Cyan
+                sound='default'
+            )
+        )
+        
         msg = messaging.Message(
             notification=messaging.Notification(title=title, body=body),
+            android=android_config,
             token=token
         )
         response = messaging.send(msg)
