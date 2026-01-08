@@ -10,6 +10,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from utils import login_to_osm, InvalidCredentialsError 
+from notifications import init_firebase_admin, analyze_and_notify
 
 # --- Importar las funciones de los scrapers ---
 from scraper_league_details import get_league_data
@@ -634,11 +635,11 @@ def sync_matches(conn, matches_data, dashboard_to_id_map, user_id):
 def get_osm_credentials(conn, user_id):
     print(f"  - Obteniendo credenciales para el usuario ID: {user_id}...")
     with conn.cursor() as cur:
-        cur.execute("SELECT osm_username, osm_password FROM public.get_credentials_for_user(%s);", (user_id,))
+        cur.execute("SELECT osm_username, osm_password, fcm_token FROM public.get_credentials_for_user(%s);", (user_id,))
         creds = cur.fetchone()
         if not creds or not creds['osm_username'] or not creds['osm_password']:
             raise Exception("No se encontraron credenciales para este usuario.")
-        return creds['osm_username'], creds['osm_password']
+        return creds['osm_username'], creds['osm_password'], creds['fcm_token']
     
 
 def invalidate_user_credentials(conn, user_id):
@@ -671,7 +672,7 @@ def run_update_for_user(user_id):
     if not conn: return
     
     try:
-        osm_username, osm_password = get_osm_credentials(conn, user_id)
+        osm_username, osm_password, user_fcm_token = get_osm_credentials(conn, user_id)
         
         if not osm_username or not osm_password:
             print(f"⚠️ El usuario {osm_username} no tiene credenciales configuradas (o fueron borradas). Abortando.")
@@ -746,6 +747,8 @@ def run_update_for_user(user_id):
     print("\n[2/3] 💾 Sincronizando BD...")
     
     max_sync_retries = 3
+    
+    grouped_transfers = {}
     
     for attempt in range(max_sync_retries):
         conn = None
@@ -823,8 +826,26 @@ def run_update_for_user(user_id):
             if matches_data: 
                 sync_matches(conn, matches_data, dashboard_to_id_map, user_id)
 
+
+            print("\n🔔 Verificando notificaciones...")
+            # Necesitas haber pasado fcm_token a través de las funciones o recuperarlo aquí
+            # Supongamos que lo tienes en la variable 'user_fcm_token'
+            
+            # Aplanar todas las transferencias de todas las ligas para buscar en todas
+            all_transfers_flat = [] 
+            for t_list in grouped_transfers.values():
+                all_transfers_flat.extend(t_list)
+
+            analyze_and_notify(
+                user_fcm_token, 
+                transfer_list_data, 
+                all_transfers_flat, 
+                osm_username # Usar el nombre de usuario como referencia de equipo
+            )
             print("\n✨ Proceso finalizado correctamente.")
             break # SI TODO SALIÓ BIEN, ROMPEMOS EL BUCLE DE REINTENTOS
+        
+        
 
         except psycopg2.OperationalError as e:
             print(f"\n⚠️ ERROR DE CONEXIÓN (Intento {attempt + 1}/{max_sync_retries}): {e}")
@@ -844,6 +865,7 @@ def run_update_for_user(user_id):
             if conn and not conn.closed: conn.close()
 
 if __name__ == "__main__":
+    init_firebase_admin()
     if len(sys.argv) > 1:
         run_update_for_user(sys.argv[1])
     else:
