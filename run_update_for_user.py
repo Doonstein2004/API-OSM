@@ -286,8 +286,9 @@ def sync_leagues_smart(conn, dashboard_to_official_map, all_leagues_data, user_i
         if matched_id:
             print(f"    ✅ Encontrada liga existente ID {matched_id} (Managers coinciden).")
             final_id = matched_id
-            # Actualizamos timestamp
             with conn.cursor() as cur:
+                # CAMBIO: Actualizamos el nombre y el timestamp
+                cur.execute("UPDATE leagues SET name = %s WHERE id = %s", (dashboard_name, final_id))
                 cur.execute("UPDATE user_leagues SET last_scraped_at = NOW() WHERE user_id = %s AND league_id = %s", (user_id, final_id))
             conn.commit()
         else:
@@ -303,7 +304,7 @@ def sync_leagues_smart(conn, dashboard_to_official_map, all_leagues_data, user_i
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO leagues (name, teams) VALUES (%s, %s) RETURNING id;",
-                    (official_name, json.dumps(teams_for_db))
+                    (dashboard_name, json.dumps(teams_for_db))
                 )
                 final_id = cur.fetchone()['id']
                 
