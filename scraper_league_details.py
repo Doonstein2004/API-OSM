@@ -1,3 +1,4 @@
+# scraper_league_details.py
 import os
 import time
 import json
@@ -12,7 +13,7 @@ def get_league_data(page):
     Extrae TANTO la clasificación general COMO los valores de equipo 
     para cada liga gestionada en un solo pase.
     
-    CORREGIDO: Detecta equipos no 'clickable' (campeones/propios).
+    CORREGIDO: Detecta equipos no 'clickable' (campeones/propios) y asegura Managers.
     """
     try:
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
@@ -60,6 +61,13 @@ def get_league_data(page):
                 
                 # === PARTE 1: EXTRAER CLASIFICACIÓN GENERAL ===
                 print(f"  - Extrayendo clasificación general...")
+                
+                # Asegurar pestaña General
+                try:
+                    page.locator("a[href='#standings-total']").click()
+                    time.sleep(1)
+                except: pass
+
                 standings_table_selector = "table.table-sticky:has(th:has-text('Pts'))"
                 page.wait_for_selector(standings_table_selector, timeout=40000)
                 
@@ -187,3 +195,6 @@ def get_league_data(page):
         
         # MANTENIDO EL RETORNO DE ERRORES ORIGINAL
         return {"error": error_message}, {"error": error_message}
+
+if __name__ == "__main__":
+    print("Este módulo está diseñado para ser importado.")
