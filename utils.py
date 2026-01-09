@@ -35,6 +35,46 @@ def handle_popups(page: Page):
             document.querySelectorAll('#preloader-image, .modal-backdrop').forEach(el => el.remove());
         """)
     except: pass
+    
+def safe_navigate(page: Page, url: str, verify_selector: str = None, max_retries=3):
+    """
+    Intenta navegar a una URL. Si falla (timeout, abortado), reintenta.
+    Si se pasa 'verify_selector', espera a que ese elemento exista para confirmar éxito.
+    """
+    for attempt in range(max_retries):
+        try:
+            # Usamos 'load' por defecto para ser conservadores, pero con timeout controlado
+            # Si falla, el except lo atrapará y reintentaremos.
+            page.goto(url, wait_until='load', timeout=30000)
+            
+            # Si nos piden verificar un elemento específico (ej: la tabla)
+            if verify_selector:
+                try:
+                    page.wait_for_selector(verify_selector, timeout=10000)
+                except TimeoutError:
+                    print(f"  ⚠️ Carga incompleta (falta '{verify_selector}'). Reintentando (F5)...")
+                    raise Exception("Selector de validación no encontrado")
+
+            # Si llegamos aquí, todo cargó bien
+            return True
+
+        except Exception as e:
+            print(f"  ⚠️ Error de navegación (Intento {attempt + 1}/{max_retries}): {e}")
+            
+            # Estrategia de "Enfriamiento" antes de reintentar
+            time.sleep(2)
+            
+            # Si no es el último intento, intentamos un Reload explícito si la URL ya está puesta
+            if attempt < max_retries - 1:
+                try:
+                    if page.url == url:
+                        print("  🔄 Aplicando Reload (F5)...")
+                        page.reload(wait_until='domcontentloaded')
+                except:
+                    pass
+
+    print(f"  ❌ Fallo definitivo navegando a {url}")
+    return False
         
 
 def safe_int(value, default=0):

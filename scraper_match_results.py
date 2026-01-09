@@ -3,7 +3,7 @@ import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
-from utils import handle_popups, safe_int
+from utils import handle_popups, safe_int, safe_navigate
 
 load_dotenv()
 
@@ -46,9 +46,11 @@ def get_match_results(page):
             
             # --- EXTRAER RESULTADOS ---
             try:
-                page.goto(RESULTS_URL)
-                page.wait_for_selector("table.table-sticky", timeout=40000)
-                handle_popups(page)
+                print(f"  - Navegando a Resultados...")
+                
+                if not safe_navigate(page, RESULTS_URL, verify_selector="table.table-sticky"):
+                    print("  ❌ No se pudo cargar la tabla de resultados. Saltando.")
+                    continue
                 
                 # Detectar Jornada
                 try:

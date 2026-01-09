@@ -4,7 +4,7 @@ import time
 import json
 from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
-from utils import handle_popups, safe_int
+from utils import handle_popups, safe_int, safe_navigate
 
 load_dotenv()
 
@@ -57,119 +57,119 @@ def get_league_data(page):
             # --- EXTRAER DATOS DE LA LIGA ---
             try:
                 print(f"  - Navegando a la página de clasificación...")
-                page.goto(LEAGUE_TABLE_URL)
+                if safe_navigate(page, LEAGUE_TABLE_URL, verify_selector="#standings-list"):
                 
-                # === PARTE 1: EXTRAER CLASIFICACIÓN GENERAL ===
-                print(f"  - Extrayendo clasificación general...")
-                
-                # Asegurar pestaña General
-                try:
-                    page.locator("a[href='#standings-total']").click()
-                    time.sleep(1)
-                except: pass
-
-                standings_table_selector = "table.table-sticky:has(th:has-text('Pts'))"
-                page.wait_for_selector(standings_table_selector, timeout=40000)
-                
-                standings_list = []
-                
-                # --- CORRECCIÓN CLAVE ---
-                # Usamos 'tbody tr' en lugar de 'tbody tr.clickable' para no perder tu equipo
-                rows = page.locator(f"{standings_table_selector} tbody tr")
-                
-                for row in rows.all():
-                    if not row.is_visible(): continue
+                    # === PARTE 1: EXTRAER CLASIFICACIÓN GENERAL ===
+                    print(f"  - Extrayendo clasificación general...")
+                    
+                    # Asegurar pestaña General
                     try:
-                        # Verificamos que sea una fila válida buscando la celda de ranking
-                        if row.locator("td.td-ranking").count() == 0: continue
+                        page.locator("a[href='#standings-list']").click()
+                        time.sleep(1)
+                    except: pass
 
-                        position = row.locator("td.td-ranking").inner_text()
-                        club_name = row.locator("span.ellipsis").inner_text()
-                        
-                        manager_locator = row.locator("span.text-italic")
-                        manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
-                        
-                        # Usamos índices fijos para las columnas estadísticas
-                        cols = row.locator("td")
-                        
-                        standings_list.append({
-                            "Position": safe_int(position),
-                            "Club": club_name,
-                            "Manager": manager_name,
-                            "Played": safe_int(cols.nth(4).inner_text()),
-                            "Won": safe_int(cols.nth(6).inner_text()),
-                            "Drew": safe_int(cols.nth(7).inner_text()),
-                            "Lost": safe_int(cols.nth(8).inner_text()),
-                            "Points": safe_int(cols.nth(9).inner_text()),
-                            "GoalsFor": safe_int(cols.nth(10).inner_text()),
-                            "GoalsAgainst": safe_int(cols.nth(12).inner_text()),
-                            "GoalDifference": safe_int(row.locator("td.td-goaldifference").inner_text())
-                        })
-                    except Exception as e:
-                        # print(f"  - Saltando fila irrelevante o error menor: {e}")
-                        continue
-                
-                # Ordenamos por si el DOM no estaba en orden
-                standings_list.sort(key=lambda x: x["Position"])
-                print(f"  ✓ Clasificación extraída: {len(standings_list)} equipos")
-                
-                # === PARTE 2: EXTRAER VALORES DE EQUIPO ===
-                print(f"  - Cambiando a la pestaña 'Squad Value'...")
-                page.locator("a[href='#standings-squad']").click()
-                
-                squad_value_panel = page.locator("#standings-squad")
-                squad_value_panel.wait_for(state="visible", timeout=40000)
-                
-                squad_values_list = []
-                
-                # --- CORRECCIÓN CLAVE ---
-                # Igual aquí, quitamos .clickable
-                rows = squad_value_panel.locator("tbody tr")
-                
-                for row in rows.all():
-                    if not row.is_visible(): continue
-                    try:
-                        if row.locator("td.td-ranking").count() == 0: continue
+                    standings_table_selector = "table.table-sticky:has(th:has-text('Pts'))"
+                    page.wait_for_selector(standings_table_selector, timeout=40000)
+                    
+                    standings_list = []
+                    
+                    # --- CORRECCIÓN CLAVE ---
+                    # Usamos 'tbody tr' en lugar de 'tbody tr.clickable' para no perder tu equipo
+                    rows = page.locator(f"{standings_table_selector} tbody tr")
+                    
+                    for row in rows.all():
+                        if not row.is_visible(): continue
+                        try:
+                            # Verificamos que sea una fila válida buscando la celda de ranking
+                            if row.locator("td.td-ranking").count() == 0: continue
 
-                        position = safe_int(row.locator("td.td-ranking").inner_text())
-                        club_name = row.locator("span.ellipsis").inner_text()
-                        
-                        # MANTENEMOS EL CAMPO MANAGER QUE FALTABA EN LA VERSIÓN NUEVA
-                        manager_locator = row.locator("span.text-italic")
-                        manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
-                        
-                        cols = row.locator("td")
-                        
-                        squad_value = cols.nth(2).locator("span.club-funds-amount").inner_text()
-                        player_count = safe_int(cols.nth(3).inner_text())
-                        avg_value = cols.nth(4).locator("span.club-funds-amount").inner_text()
-                        
-                        squad_values_list.append({
-                            "Position": position,
-                            "Club": club_name,
-                            "Manager": manager_name,  # Restaurado
-                            "Value": squad_value,
-                            "Players": player_count,
-                            "AverageValue": avg_value
-                        })
-                    except Exception as e:
-                        continue
-                
-                squad_values_list.sort(key=lambda x: x["Position"])
-                print(f"  ✓ Valores de equipo extraídos: {len(squad_values_list)} equipos")
-                
-                # === PARTE 3: AGREGAR A LAS LISTAS SEPARADAS (FORMATO ORIGINAL) ===
-                all_leagues_standings.append({
-                    "team_name": team_name,
-                    "league_name": league_name,
-                    "standings": standings_list
-                })
-                
-                all_leagues_squad_values.append({
-                    "team_name": team_name,
-                    "league_name": league_name,
-                    "squad_values_ranking": squad_values_list
-                })
+                            position = row.locator("td.td-ranking").inner_text()
+                            club_name = row.locator("span.ellipsis").inner_text()
+                            
+                            manager_locator = row.locator("span.text-italic")
+                            manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
+                            
+                            # Usamos índices fijos para las columnas estadísticas
+                            cols = row.locator("td")
+                            
+                            standings_list.append({
+                                "Position": safe_int(position),
+                                "Club": club_name,
+                                "Manager": manager_name,
+                                "Played": safe_int(cols.nth(4).inner_text()),
+                                "Won": safe_int(cols.nth(6).inner_text()),
+                                "Drew": safe_int(cols.nth(7).inner_text()),
+                                "Lost": safe_int(cols.nth(8).inner_text()),
+                                "Points": safe_int(cols.nth(9).inner_text()),
+                                "GoalsFor": safe_int(cols.nth(10).inner_text()),
+                                "GoalsAgainst": safe_int(cols.nth(12).inner_text()),
+                                "GoalDifference": safe_int(row.locator("td.td-goaldifference").inner_text())
+                            })
+                        except Exception as e:
+                            # print(f"  - Saltando fila irrelevante o error menor: {e}")
+                            continue
+                    
+                    # Ordenamos por si el DOM no estaba en orden
+                    standings_list.sort(key=lambda x: x["Position"])
+                    print(f"  ✓ Clasificación extraída: {len(standings_list)} equipos")
+                    
+                    # === PARTE 2: EXTRAER VALORES DE EQUIPO ===
+                    print(f"  - Cambiando a la pestaña 'Squad Value'...")
+                    page.locator("a[href='#standings-squad']").click()
+                    
+                    squad_value_panel = page.locator("#standings-squad")
+                    squad_value_panel.wait_for(state="visible", timeout=40000)
+                    
+                    squad_values_list = []
+                    
+                    # --- CORRECCIÓN CLAVE ---
+                    # Igual aquí, quitamos .clickable
+                    rows = squad_value_panel.locator("tbody tr")
+                    
+                    for row in rows.all():
+                        if not row.is_visible(): continue
+                        try:
+                            if row.locator("td.td-ranking").count() == 0: continue
+
+                            position = safe_int(row.locator("td.td-ranking").inner_text())
+                            club_name = row.locator("span.ellipsis").inner_text()
+                            
+                            # MANTENEMOS EL CAMPO MANAGER QUE FALTABA EN LA VERSIÓN NUEVA
+                            manager_locator = row.locator("span.text-italic")
+                            manager_name = manager_locator.inner_text() if manager_locator.count() > 0 else "N/A"
+                            
+                            cols = row.locator("td")
+                            
+                            squad_value = cols.nth(2).locator("span.club-funds-amount").inner_text()
+                            player_count = safe_int(cols.nth(3).inner_text())
+                            avg_value = cols.nth(4).locator("span.club-funds-amount").inner_text()
+                            
+                            squad_values_list.append({
+                                "Position": position,
+                                "Club": club_name,
+                                "Manager": manager_name,  # Restaurado
+                                "Value": squad_value,
+                                "Players": player_count,
+                                "AverageValue": avg_value
+                            })
+                        except Exception as e:
+                            continue
+                    
+                    squad_values_list.sort(key=lambda x: x["Position"])
+                    print(f"  ✓ Valores de equipo extraídos: {len(squad_values_list)} equipos")
+                    
+                    # === PARTE 3: AGREGAR A LAS LISTAS SEPARADAS (FORMATO ORIGINAL) ===
+                    all_leagues_standings.append({
+                        "team_name": team_name,
+                        "league_name": league_name,
+                        "standings": standings_list
+                    })
+                    
+                    all_leagues_squad_values.append({
+                        "team_name": team_name,
+                        "league_name": league_name,
+                        "squad_values_ranking": squad_values_list
+                    })
 
             except (TimeoutError, PlaywrightError) as e:
                 print(f"  ❌ ERROR al procesar datos para '{team_name}' en '{league_name}'. Saltando. Error: {e}")

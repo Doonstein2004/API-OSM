@@ -1,7 +1,7 @@
 # scraper_market_data.py
 import time
 from playwright.sync_api import Page, expect, TimeoutError
-from utils import handle_popups, safe_int
+from utils import handle_popups, safe_int, safe_navigate
 
 def parse_price(price_text):
     if not isinstance(price_text, str): return 0
@@ -58,94 +58,106 @@ def get_market_data(page: Page):
             page.wait_for_selector("#timers", timeout=60000)
             handle_popups(page)
 
-            page.goto(TRANSFERS_URL, wait_until="load")
-            handle_popups(page)
-
+            
             # --- EXTRACCIÓN CON FALLBACK ---
             print("  - Extrayendo datos de jugadores...")
             try:
-                table_selector = "#transfer-list table.table-sticky tbody tr.clickable"
-                page.wait_for_selector(table_selector, timeout=20000)
                 
-                # JS mejorado para encontrar los datos sin importar la estructura exacta
-                players_on_sale_raw = page.evaluate("""
-                    () => {
-                        const rows = Array.from(document.querySelectorAll("#transfer-list table.table-sticky tbody tr.clickable"));
-                        return rows.map(row => {
-                            const data = ko.dataFor(row);
-                            if (!data) return null;
-                            
-                            const player = data.playerPartial ? data.playerPartial() : null;
-                            if (!player) return null;
-                            
-                            const cols = row.querySelectorAll("td");
-                            
-                            // FALLBACK PARA EL PRECIO: 
-                            // 1. Intentamos data.price (observable)
-                            // 2. Intentamos leer el texto de la última columna
-                            let price = 0;
-                            if (typeof data.price === 'function') price = data.price();
-                            else if (data.price) price = data.price;
-                            else {
-                                const priceText = cols[cols.length - 1].innerText;
-                                price = priceText.replace(/[^0-9.]/g, ''); // Limpieza básica
-                            }
-
-                            return {
-                                name: player.name || "N/A",
-                                nationality: (player.nationality && player.nationality.name) ? player.nationality.name : "N/A",
-                                position: cols[2] ? cols[2].innerText.trim() : "N/A",
-                                age: player.age || 0,
-                                seller_team: data.teamPartial ? data.teamPartial().name : "CPU",
-                                seller_manager: (data.teamPartial && data.teamPartial().managerPartial()) 
-                                                ? data.teamPartial().managerPartial().name 
-                                                : "CPU",
-                                attack: player.statAtt || 0,
-                                defense: player.statDef || 0,
-                                overall: player.statOvr || 0,
-                                price_val: price,
-                                value_val: player.value || 0
-                            };
-                        }).filter(p => p !== null);
-                    }
-                """)
-                
-                # Procesamiento en Python (Millones)
-                players_on_sale = []
-                for p in players_on_sale_raw:
+                if safe_navigate(page, TRANSFERS_URL, verify_selector="#transfer-list"):
+                    # B. ESPERA INTELIGENTE DE DATOS
+                    # No basta con que este la tabla, esperamos a que haya filas 'clickable' (jugadores)
+                    print("  - Esperando renderizado de jugadores...")
                     try:
-                        # Limpiamos y convertimos a millones
-                        # Si price_val ya es un número grande (ej 78600000), dividimos
-                        # Si es un string como "78.6", lo tratamos como tal
-                        raw_p = str(p.get('price_val', 0)).lower()
-                        raw_v = str(p.get('value_val', 0)).lower()
+                        # Esperamos hasta 15 segundos a que aparezca al menos una fila de jugador
+                        page.wait_for_selector("#transfer-list table.table-sticky tbody tr.clickable", state="visible", timeout=15000)
                         
-                        def to_million(val_str):
-                            clean = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == ',', val_str)).replace(',', '.')
-                            if not clean: return 0.0
-                            num = float(clean)
-                            # Si el número es mayor a 10000, asumimos que viene en unidades completas (ej. 15000000)
-                            if num > 10000: return round(num / 1_000_000, 2)
-                            return round(num, 2)
+                        # Pequeña pausa extra para asegurar que se pintaron todos los textos
+                        time.sleep(2) 
+                    except TimeoutError:
+                        print("    ⚠️ Tiempo de espera agotado: La tabla sigue vacía (¿Mercado vacío o fallo de carga?).")
+                        # Opcional: Tomar captura para depurar si sale 0 siempre
+                        # page.screenshot(path=f"debug_market_empty_{i}.png")
+                    
+                
+                    # JS mejorado para encontrar los datos sin importar la estructura exacta
+                    players_on_sale_raw = page.evaluate("""
+                        () => {
+                            const rows = Array.from(document.querySelectorAll("#transfer-list table.table-sticky tbody tr.clickable"));
+                            return rows.map(row => {
+                                const data = ko.dataFor(row);
+                                if (!data) return null;
+                                
+                                const player = data.playerPartial ? data.playerPartial() : null;
+                                if (!player) return null;
+                                
+                                const cols = row.querySelectorAll("td");
+                                
+                                // FALLBACK PARA EL PRECIO: 
+                                // 1. Intentamos data.price (observable)
+                                // 2. Intentamos leer el texto de la última columna
+                                let price = 0;
+                                if (typeof data.price === 'function') price = data.price();
+                                else if (data.price) price = data.price;
+                                else {
+                                    const priceText = cols[cols.length - 1].innerText;
+                                    price = priceText.replace(/[^0-9.]/g, ''); // Limpieza básica
+                                }
 
-                        p['price'] = to_million(raw_p)
-                        p['value'] = to_million(raw_v)
-                        
-                        # Debug preventivo
-                        # print(f"    [CHECK] {p['name']}: {p['price']}M | {p['value']}M")
-                        
-                        # Limpiar campos temporales
-                        del p['price_val']
-                        del p['value_val']
-                        players_on_sale.append(p)
-                    except: continue
+                                return {
+                                    name: player.name || "N/A",
+                                    nationality: (player.nationality && player.nationality.name) ? player.nationality.name : "N/A",
+                                    position: cols[2] ? cols[2].innerText.trim() : "N/A",
+                                    age: player.age || 0,
+                                    seller_team: data.teamPartial ? data.teamPartial().name : "CPU",
+                                    seller_manager: (data.teamPartial && data.teamPartial().managerPartial()) 
+                                                    ? data.teamPartial().managerPartial().name 
+                                                    : "CPU",
+                                    attack: player.statAtt || 0,
+                                    defense: player.statDef || 0,
+                                    overall: player.statOvr || 0,
+                                    price_val: price,
+                                    value_val: player.value || 0
+                                };
+                            }).filter(p => p !== null);
+                        }
+                    """)
+                    
+                    # Procesamiento en Python (Millones)
+                    players_on_sale = []
+                    for p in players_on_sale_raw:
+                        try:
+                            # Limpiamos y convertimos a millones
+                            # Si price_val ya es un número grande (ej 78600000), dividimos
+                            # Si es un string como "78.6", lo tratamos como tal
+                            raw_p = str(p.get('price_val', 0)).lower()
+                            raw_v = str(p.get('value_val', 0)).lower()
+                            
+                            def to_million(val_str):
+                                clean = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == ',', val_str)).replace(',', '.')
+                                if not clean: return 0.0
+                                num = float(clean)
+                                # Si el número es mayor a 10000, asumimos que viene en unidades completas (ej. 15000000)
+                                if num > 10000: return round(num / 1_000_000, 2)
+                                return round(num, 2)
 
-                all_teams_transfer_list.append({
-                    "team_name": team_name, 
-                    "league_name": league_name, 
-                    "players_on_sale": players_on_sale
-                })
-                print(f"  ✓ {len(players_on_sale)} jugadores extraídos.")
+                            p['price'] = to_million(raw_p)
+                            p['value'] = to_million(raw_v)
+                            
+                            # Debug preventivo
+                            # print(f"    [CHECK] {p['name']}: {p['price']}M | {p['value']}M")
+                            
+                            # Limpiar campos temporales
+                            del p['price_val']
+                            del p['value_val']
+                            players_on_sale.append(p)
+                        except: continue
+
+                    all_teams_transfer_list.append({
+                        "team_name": team_name, 
+                        "league_name": league_name, 
+                        "players_on_sale": players_on_sale
+                    })
+                    print(f"  ✓ {len(players_on_sale)} jugadores extraídos.")
 
             except Exception as e:
                 print(f"  ⚠️ Error extrayendo mercado: {e}")
