@@ -147,7 +147,10 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
 
     return active_leagues_list
 
-def find_matching_active_league(conn, user_id, official_name, current_managers_set):
+def find_matching_active_league(conn, user_id, official_name, current_managers_set, excluded_ids=None):
+    if excluded_ids is None:
+        excluded_ids = set()
+
     with conn.cursor() as cur:
         sql = """
             SELECT l.id, ul.managers_by_team 
@@ -162,18 +165,32 @@ def find_matching_active_league(conn, user_id, official_name, current_managers_s
         best_ratio = 0.0
         
         for row in candidates:
+            # SI EL ID YA ESTÁ USADO, LO SALTAMOS INMEDIATAMENTE
+            if row['id'] in excluded_ids:
+                continue
+
             saved_mgrs = set((row['managers_by_team'] or {}).values())
-            if not saved_mgrs: continue
+            
+            # Si la liga guardada está vacía (recién creada), le damos prioridad baja pero válida
+            if not saved_mgrs:
+                if best_id is None: best_id = row['id']
+                continue
             
             common = current_managers_set.intersection(saved_mgrs)
-            ratio = len(common) / len(saved_mgrs)
+            ratio = len(common) / len(saved_mgrs) if len(saved_mgrs) > 0 else 0
             
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_id = row['id']
         
-        if best_id and best_ratio > 0.40:
-            return best_id
+        # Umbral relajado: Si hay coincidencia decente O si es la única disponible (ratio 0 pero sin managers previos)
+        if best_id:
+            if best_ratio > 0.30: # Bajamos un poco el umbral
+                return best_id
+            # Si no hay match fuerte, pero hay una liga disponible vacía o única que no está excluida, la tomamos
+            if best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids:
+                 return best_id
+                 
         return None
 
 def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, standings_data):
@@ -187,7 +204,6 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
         off_name = item["official_name"]
         idx = item["data_index"]
         
-        # Recuperar datos usando el índice
         ls_data = standings_data[idx]
         
         curr_mgrs = set()
@@ -195,11 +211,10 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
             m = t.get("Manager", "N/A")
             if m and m != "N/A": curr_mgrs.add(m)
         
-        matched_id = find_matching_active_league(conn, user_id, dash_name, curr_mgrs)
+        # --- CAMBIO AQUÍ: Pasamos confirmed_ids como excluidos ---
+        matched_id = find_matching_active_league(conn, user_id, dash_name, curr_mgrs, confirmed_ids)
         
-        if matched_id in confirmed_ids:
-            print(f"    ⚠️ ID {matched_id} ya usado hoy. Creando nueva instancia.")
-            matched_id = None
+        # Ya no necesitamos el check de "if matched_id in confirmed_ids" porque la función de arriba ya lo filtra
         
         final_id = None
         
@@ -213,7 +228,6 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
         else:
             print(f"    ✨ [{idx}] Creando NUEVA instancia para '{dash_name}'...")
             
-            # Datos de equipos
             league_info_db = next((l for l in all_leagues_data if l.get('league_name') == off_name), None)
             raw_clubs = league_info_db.get("clubs", []) if league_info_db else []
             
@@ -240,11 +254,10 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
 
         confirmed_ids.add(final_id)
         
-        # Agregamos el ID al objeto para usarlo después
         item["league_id"] = final_id
         processed_leagues.append(item)
 
-    # Limpieza de ligas viejas
+    # Limpieza
     with conn.cursor() as cur:
         cur.execute("SELECT league_id FROM user_leagues WHERE user_id = %s AND is_active = TRUE", (user_id,))
         active_db_ids = {row['league_id'] for row in cur.fetchall()}
