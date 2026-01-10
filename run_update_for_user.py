@@ -112,7 +112,6 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
         dashboard_name = league_info.get("league_name")
         managed_team = league_info.get("team_name")
         
-        # --- Lógica de Votación para encontrar nombre oficial ---
         current_competitors = {normalize_team_name(t['Club']) for t in league_info.get("standings", [])}
         norm_my_team = normalize_team_name(managed_team)
         candidates = team_to_leagues_master.get(norm_my_team, [])
@@ -148,8 +147,7 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
     return active_leagues_list
 
 def find_matching_active_league(conn, user_id, official_name, current_managers_set, excluded_ids=None):
-    if excluded_ids is None:
-        excluded_ids = set()
+    if excluded_ids is None: excluded_ids = set()
 
     with conn.cursor() as cur:
         sql = """
@@ -165,32 +163,25 @@ def find_matching_active_league(conn, user_id, official_name, current_managers_s
         best_ratio = 0.0
         
         for row in candidates:
-            # SI EL ID YA ESTÁ USADO, LO SALTAMOS INMEDIATAMENTE
-            if row['id'] in excluded_ids:
-                continue
+            if row['id'] in excluded_ids: continue # Saltar IDs ya usados
 
             saved_mgrs = set((row['managers_by_team'] or {}).values())
-            
-            # Si la liga guardada está vacía (recién creada), le damos prioridad baja pero válida
             if not saved_mgrs:
+                # Priorizar liga vacía si no hay match
                 if best_id is None: best_id = row['id']
                 continue
             
             common = current_managers_set.intersection(saved_mgrs)
-            ratio = len(common) / len(saved_mgrs) if len(saved_mgrs) > 0 else 0
+            ratio = len(common) / len(saved_mgrs)
             
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_id = row['id']
         
-        # Umbral relajado: Si hay coincidencia decente O si es la única disponible (ratio 0 pero sin managers previos)
         if best_id:
-            if best_ratio > 0.30: # Bajamos un poco el umbral
-                return best_id
-            # Si no hay match fuerte, pero hay una liga disponible vacía o única que no está excluida, la tomamos
-            if best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids:
-                 return best_id
-                 
+            if best_ratio > 0.30: return best_id
+            if best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids: return best_id
+
         return None
 
 def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, standings_data):
@@ -204,6 +195,7 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
         off_name = item["official_name"]
         idx = item["data_index"]
         
+        # Recuperar datos usando el índice
         ls_data = standings_data[idx]
         
         curr_mgrs = set()
@@ -211,10 +203,7 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
             m = t.get("Manager", "N/A")
             if m and m != "N/A": curr_mgrs.add(m)
         
-        # --- CAMBIO AQUÍ: Pasamos confirmed_ids como excluidos ---
         matched_id = find_matching_active_league(conn, user_id, dash_name, curr_mgrs, confirmed_ids)
-        
-        # Ya no necesitamos el check de "if matched_id in confirmed_ids" porque la función de arriba ya lo filtra
         
         final_id = None
         
@@ -254,6 +243,7 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
 
         confirmed_ids.add(final_id)
         
+        # Agregamos el ID al objeto y lo guardamos en la lista final
         item["league_id"] = final_id
         processed_leagues.append(item)
 
@@ -270,7 +260,7 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
     return processed_leagues
 
 # ==========================================
-# 3. PROCESAMIENTO Y CARGA DE DATOS
+# 3. PROCESAMIENTO Y CARGA DE DATOS (POR ÍNDICE)
 # ==========================================
 
 def sync_league_details(conn, standings_data, squad_values_data, processed_leagues, user_id):
@@ -301,11 +291,10 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
         league_id = item["league_id"]
         
         if idx >= len(fichajes_data): continue
-        team_block = fichajes_data[idx]
+        team_block = fichajes_data[idx] # Acceso directo por Slot
 
         for transfer in team_block.get("transfers", []):
             try:
-                # Clave única para evitar duplicados en memoria
                 t_key = (transfer.get("Name"), transfer.get("From"), transfer.get("To"), transfer.get("Price"), league_id)
                 if t_key in processed_keys: continue
                 processed_keys.add(t_key)
@@ -335,33 +324,6 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
             except: continue
     return dict(grouped)
 
-def upload_data_to_postgres(conn, grouped_transfers, user_id):
-    print("\n📦 Sincronizando fichajes...")
-    with conn.cursor() as cur:
-        for league_id, transfers in grouped_transfers.items():
-            if not transfers: continue
-            
-            unique_batch = {}
-            for t in transfers:
-                key = (user_id, league_id, t['round'], t['playerName'], t['managerName'], t['finalPrice'])
-                unique_batch[key] = t
-            
-            data = [
-                (user_id, league_id, t['playerName'], t['managerName'], t['transactionType'],
-                 t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt'],
-                 t['seller_manager'], t['buyer_manager'], t['from_text'], t['to_text']) 
-                for t in unique_batch.values()
-            ]
-            
-            sql = """
-                INSERT INTO transfers (user_id, league_id, player_name, manager_name, transaction_type, position, round, base_value, final_price, created_at, seller_manager, buyer_manager, from_text, to_text) 
-                VALUES %s ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price) 
-                DO UPDATE SET seller_manager=EXCLUDED.seller_manager, buyer_manager=EXCLUDED.buyer_manager;
-            """
-            psycopg2.extras.execute_values(cur, sql, data, page_size=200)
-            print(f"  - Liga ID {league_id}: {len(data)} fichajes.")
-    conn.commit()
-
 def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts):
     print(f"  - Sincronizando mercado...")
     with conn.cursor() as cur:
@@ -372,7 +334,7 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
             if idx >= len(transfer_list_data): continue
             players = transfer_list_data[idx].get("players_on_sale", [])
 
-            # Archivar viejos
+            # Archivar viejos solo para ESTA liga
             cur.execute("UPDATE public.transfer_list_players SET is_active = FALSE WHERE user_id=%s AND league_id=%s AND is_active=TRUE", (user_id, league_id))
             
             if not players: continue
@@ -399,6 +361,7 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
                     scraped_at=EXCLUDED.scraped_at, is_active=TRUE;
             """
             psycopg2.extras.execute_values(cur, sql, data)
+            print(f"    - Liga ID {league_id}: {len(data)} en venta.")
     conn.commit()
 
 def sync_matches(conn, matches_data, processed_leagues, user_id):
@@ -463,6 +426,34 @@ def invalidate_user_credentials(conn, user_id):
     except Exception as e:
         print(f"❌ Error al invalidar credenciales: {e}")
 
+def upload_data_to_postgres(conn, grouped_transfers, user_id):
+    # grouped_transfers ahora es un dict {league_id: [transfers]} gracias a translate_and_group_transfers
+    print("\n📦 Sincronizando fichajes...")
+    with conn.cursor() as cur:
+        for league_id, transfers in grouped_transfers.items():
+            if not transfers: continue
+            
+            unique_batch = {}
+            for t in transfers:
+                key = (user_id, league_id, t['round'], t['playerName'], t['managerName'], t['finalPrice'])
+                unique_batch[key] = t
+            
+            data = [
+                (user_id, league_id, t['playerName'], t['managerName'], t['transactionType'],
+                 t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt'],
+                 t['seller_manager'], t['buyer_manager'], t['from_text'], t['to_text']) 
+                for t in unique_batch.values()
+            ]
+            
+            sql = """
+                INSERT INTO transfers (user_id, league_id, player_name, manager_name, transaction_type, position, round, base_value, final_price, created_at, seller_manager, buyer_manager, from_text, to_text) 
+                VALUES %s ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price) 
+                DO UPDATE SET seller_manager=EXCLUDED.seller_manager, buyer_manager=EXCLUDED.buyer_manager;
+            """
+            psycopg2.extras.execute_values(cur, sql, data, page_size=200)
+            print(f"  - Liga ID {league_id}: {len(data)} fichajes.")
+    conn.commit()
+
 def run_update_for_user(user_id):
     print(f"🚀 Iniciando actualización para usuario: {user_id}")
     
@@ -491,6 +482,7 @@ def run_update_for_user(user_id):
             try:
                 if not login_to_osm(page, osm_username, osm_password): raise Exception("Login fallido")
             except InvalidCredentialsError:
+                print("❌ ERROR FATAL: Credenciales incorrectas.")
                 invalidate_user_credentials(conn, user_id)
                 conn.close(); return
 
@@ -513,7 +505,7 @@ def run_update_for_user(user_id):
             conn = get_db_connection()
             if not conn: raise Exception("Error conexión")
 
-            # A. Resolver Ligas (Devuelve Lista)
+            # A. Resolver Ligas
             all_leagues_db = get_leagues_for_mapping(conn)
             processed_leagues = resolve_active_leagues(fichajes_data, all_leagues_db, standings_data, LEAGUES_TO_IGNORE)
             
