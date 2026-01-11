@@ -146,17 +146,22 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
 
     return active_leagues_list
 
-def find_matching_active_league(conn, user_id, official_name, current_managers_set, excluded_ids=None):
+def find_matching_active_league(conn, user_id, dashboard_name, current_managers_set, excluded_ids=None):
+    """
+    Busca una liga existente en TODA la BD (no solo del usuario) que coincida con el fingerprint de managers.
+    Retorna (league_id, needs_new_link) donde needs_new_link indica si hay que vincular al usuario.
+    """
     if excluded_ids is None: excluded_ids = set()
 
     with conn.cursor() as cur:
+        # BÚSQUEDA GLOBAL: Busca en TODAS las ligas con ese nombre (de cualquier usuario)
         sql = """
-            SELECT l.id, ul.managers_by_team 
-            FROM user_leagues ul
-            JOIN leagues l ON ul.league_id = l.id
-            WHERE ul.user_id = %s AND l.name = %s AND ul.is_active = TRUE;
+            SELECT DISTINCT l.id, ul.managers_by_team 
+            FROM leagues l
+            JOIN user_leagues ul ON ul.league_id = l.id
+            WHERE l.name = %s AND ul.is_active = TRUE;
         """
-        cur.execute(sql, (user_id, official_name))
+        cur.execute(sql, (dashboard_name,))
         candidates = cur.fetchall()
         
         best_id = None
@@ -179,10 +184,14 @@ def find_matching_active_league(conn, user_id, official_name, current_managers_s
                 best_id = row['id']
         
         if best_id:
-            if best_ratio > 0.30: return best_id
-            if best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids: return best_id
+            match_found = best_ratio > 0.30 or (best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids)
+            if match_found:
+                # Verificar si el usuario ya está vinculado a esta liga
+                cur.execute("SELECT 1 FROM user_leagues WHERE user_id = %s AND league_id = %s", (user_id, best_id))
+                user_already_linked = cur.fetchone() is not None
+                return best_id, not user_already_linked  # (id, needs_new_link)
 
-        return None
+        return None, False
 
 def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, standings_data):
     print("\n🔄 Sincronizando IDs de ligas...")
@@ -203,16 +212,24 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
             m = t.get("Manager", "N/A")
             if m and m != "N/A": curr_mgrs.add(m)
         
-        matched_id = find_matching_active_league(conn, user_id, dash_name, curr_mgrs, confirmed_ids)
+        matched_id, needs_link = find_matching_active_league(conn, user_id, dash_name, curr_mgrs, confirmed_ids)
         
         final_id = None
         
         if matched_id:
-            print(f"    ✅ [{idx}] Liga existente ID {matched_id}.")
+            print(f"    ✅ [{idx}] Liga existente ID {matched_id}." + (" (Vinculando usuario)" if needs_link else ""))
             final_id = matched_id
             with conn.cursor() as cur:
+                if needs_link:
+                    # Usuario nuevo en esta liga global, crear vínculo
+                    cur.execute("""
+                        INSERT INTO user_leagues (user_id, league_id, is_active, last_scraped_at)
+                        VALUES (%s, %s, TRUE, NOW())
+                        ON CONFLICT (user_id, league_id) DO UPDATE SET is_active = TRUE, last_scraped_at = NOW()
+                    """, (user_id, final_id))
                 cur.execute("UPDATE leagues SET name = %s WHERE id = %s", (dash_name, final_id))
-                cur.execute("UPDATE user_leagues SET last_scraped_at = NOW() WHERE user_id = %s AND league_id = %s", (user_id, final_id))
+                # Actualizar last_scraped_at para TODOS los usuarios de esta liga
+                cur.execute("UPDATE user_leagues SET last_scraped_at = NOW() WHERE league_id = %s", (final_id,))
             conn.commit()
         else:
             print(f"    ✨ [{idx}] Creando NUEVA instancia para '{dash_name}'...")
@@ -264,6 +281,7 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
 # ==========================================
 
 def sync_league_details(conn, standings_data, squad_values_data, processed_leagues, user_id):
+    """Sincroniza detalles de liga para TODOS los usuarios vinculados."""
     print("\n🔄 Sincronizando detalles...")
     with conn.cursor() as cur:
         for item in processed_leagues:
@@ -278,8 +296,9 @@ def sync_league_details(conn, standings_data, squad_values_data, processed_leagu
             
             squad_vals = lv.get("squad_values_ranking", []) if lv else []
 
-            sql = "UPDATE user_leagues SET standings=%s, squad_values=%s, managers_by_team=%s WHERE user_id=%s AND league_id=%s"
-            cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(mgrs), user_id, league_id))
+            # Actualizar para TODOS los usuarios vinculados a esta liga (no solo el actual)
+            sql = "UPDATE user_leagues SET standings=%s, squad_values=%s, managers_by_team=%s WHERE league_id=%s"
+            cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(mgrs), league_id))
     conn.commit()
 
 def translate_and_group_transfers(fichajes_data, processed_leagues):
