@@ -344,6 +344,7 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
     return dict(grouped)
 
 def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts):
+    # Transfer list son datos compartidos de la liga
     print(f"  - Sincronizando mercado...")
     with conn.cursor() as cur:
         for item in processed_leagues:
@@ -354,7 +355,7 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
             players = transfer_list_data[idx].get("players_on_sale", [])
 
             # Archivar viejos solo para ESTA liga
-            cur.execute("UPDATE public.transfer_list_players SET is_active = FALSE WHERE user_id=%s AND league_id=%s AND is_active=TRUE", (user_id, league_id))
+            cur.execute("UPDATE public.transfer_list_players SET is_active = FALSE WHERE league_id=%s AND is_active=TRUE", (league_id,))
             
             if not players: continue
 
@@ -362,7 +363,7 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
             for p in players: unique[(p['name'], p['seller_manager'])] = p
             
             data = [
-                (user_id, league_id, p['name'], p['seller_manager'], p.get('nationality', 'N/A'),
+                (league_id, p['name'], p['seller_manager'], p.get('nationality', 'N/A'),
                  p['position'], p['age'], p['seller_team'], p['attack'], p['defense'], p['overall'], 
                  p['price'], p.get('value', 0), ts, ts, True) 
                 for p in unique.values()
@@ -370,11 +371,11 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
 
             sql = """
                 INSERT INTO public.transfer_list_players (
-                    user_id, league_id, name, seller_manager, nationality, position, age, 
+                    league_id, name, seller_manager, nationality, position, age, 
                     seller_team, attack, defense, overall, price, base_value, 
                     scrape_id, scraped_at, is_active
                 ) VALUES %s
-                ON CONFLICT (user_id, league_id, name, seller_manager)
+                ON CONFLICT (league_id, name, seller_manager)
                 DO UPDATE SET
                     price=EXCLUDED.price, base_value=EXCLUDED.base_value, 
                     scraped_at=EXCLUDED.scraped_at, is_active=TRUE;
@@ -446,7 +447,7 @@ def invalidate_user_credentials(conn, user_id):
         print(f"❌ Error al invalidar credenciales: {e}")
 
 def upload_data_to_postgres(conn, grouped_transfers, user_id):
-    # grouped_transfers ahora es un dict {league_id: [transfers]} gracias a translate_and_group_transfers
+    # Transfers son datos compartidos de la liga, no necesitan user_id
     print("\n📦 Sincronizando fichajes...")
     with conn.cursor() as cur:
         for league_id, transfers in grouped_transfers.items():
@@ -454,19 +455,19 @@ def upload_data_to_postgres(conn, grouped_transfers, user_id):
             
             unique_batch = {}
             for t in transfers:
-                key = (user_id, league_id, t['round'], t['playerName'], t['managerName'], t['finalPrice'])
+                key = (league_id, t['round'], t['playerName'], t['managerName'], t['finalPrice'])
                 unique_batch[key] = t
             
             data = [
-                (user_id, league_id, t['playerName'], t['managerName'], t['transactionType'],
+                (league_id, t['playerName'], t['managerName'], t['transactionType'],
                  t['position'], t['round'], t['baseValue'], t['finalPrice'], t['createdAt'],
                  t['seller_manager'], t['buyer_manager'], t['from_text'], t['to_text']) 
                 for t in unique_batch.values()
             ]
             
             sql = """
-                INSERT INTO transfers (user_id, league_id, player_name, manager_name, transaction_type, position, round, base_value, final_price, created_at, seller_manager, buyer_manager, from_text, to_text) 
-                VALUES %s ON CONFLICT (user_id, league_id, round, player_name, manager_name, final_price) 
+                INSERT INTO transfers (league_id, player_name, manager_name, transaction_type, position, round, base_value, final_price, created_at, seller_manager, buyer_manager, from_text, to_text) 
+                VALUES %s ON CONFLICT (league_id, round, player_name, manager_name, final_price) 
                 DO UPDATE SET seller_manager=EXCLUDED.seller_manager, buyer_manager=EXCLUDED.buyer_manager;
             """
             psycopg2.extras.execute_values(cur, sql, data, page_size=200)
