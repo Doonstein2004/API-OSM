@@ -66,8 +66,15 @@ def send_push(token, title, body):
     except Exception as e:
         print(f"❌ Error enviando push a Firebase: {e}")
 
-# --- 3. LÓGICA DE NEGOCIO ---
+# --- 3. LÓGICA DE NEGOCIO MEJORADA ---
 def analyze_and_notify(user_fcm_token, transfer_list, all_transfers, my_manager_name):
+    """
+    Analiza las transferencias y envía notificaciones inteligentes.
+    - Omitimos nuestras compras (ya lo sabemos).
+    - Notificamos ventas (flujo de caja).
+    - Notificamos 'Bombazos' (>50M) de otros.
+    - Notificamos 'Gangas' (Jugadores baratos en lista).
+    """
     # Verificación temprana
     if not user_fcm_token:
         print("🔕 El usuario no tiene token FCM. Saltando análisis.")
@@ -80,27 +87,59 @@ def analyze_and_notify(user_fcm_token, transfer_list, all_transfers, my_manager_
 
     print(f"🧐 Analizando notificaciones para: {my_manager_name}")
 
-    # 1. VENTAS PROPIAS
-    my_sales = []
+    if my_manager_name:
+        my_name = my_manager_name.lower().strip()
+    else:
+        my_name = ""
+
+    # 1. ANALIZAR ÚLTIMO MOVIMIENTO (Ventas y Bombazos de Otros)
     if all_transfers:
-        for t in all_transfers:
-            seller = t.get('seller_manager') or t.get('managerName')
-            if seller and my_manager_name and seller.lower() == my_manager_name.lower():
-                my_sales.append(t)
-
-    if my_sales:
-        last_sale = my_sales[0]
-        player = last_sale.get('playerName', 'Un jugador')
-        price = last_sale.get('finalPrice', 0)
+        # Asumimos que all_transfers[0] es la más reciente (ordenado por fecha desc)
+        last_transfer = all_transfers[0] 
         
-        send_push(
-            user_fcm_token, 
-            "💰 ¡VENTA REALIZADA!", 
-            f"Has vendido a {player} por {price}M. ¡Tienes dinero fresco en caja!"
-        )
-        return 
+        player = last_transfer.get('playerName', 'Un jugador')
+        price = last_transfer.get('finalPrice', 0)
+        buyer = last_transfer.get('buyerManager')
+        seller = last_transfer.get('sellerManager')
+        manager_op = last_transfer.get('managerName') 
+        trans_type = last_transfer.get('transactionType') 
 
-    # 2. GANGAS
+        # Normalizar
+        buyer_norm = buyer.lower().strip() if buyer else ''
+        seller_norm = seller.lower().strip() if seller else ''
+        op_norm = manager_op.lower().strip() if manager_op else ''
+
+        # ID de compras propias para ignorar en bombazos también
+        is_my_purchase = (buyer_norm == my_name) or (op_norm == my_name and trans_type == 'purchase')
+        
+        # ID Ventas propias
+        is_my_sale = (seller_norm == my_name) or (op_norm == my_name and trans_type == 'sale')
+
+        # >>> NOTIFICACIÓN 1: MI VENTA (PRIORIDAD ALTA) <<<
+        if is_my_sale:
+            send_push(
+                user_fcm_token, 
+                "💰 ¡VENTA REALIZADA!", 
+                f"Has vendido a {player} por {price}M. ¡Tienes dinero fresco en caja!"
+            )
+            return
+
+        # (Omitimos notificación de compra propia intencionalmente)
+
+        # >>> NOTIFICACIÓN 2: BOMBAZO DE OTRO MANAGER (> 50M) <<<
+        # Solo si no soy yo ni comprando ni vendiendo (para no spammear si ya se que vendí caro)
+        if price > 50 and not is_my_sale and not is_my_purchase:
+            who_bought = buyer if buyer else (manager_op if manager_op else "CPU")
+            send_push(
+                user_fcm_token, 
+                "💸 ¡BOMBAZO EN LA LIGA!", 
+                f"{who_bought} ha pagado {price}M por {player}. ¡El mercado está loco!"
+            )
+            # Retornamos aquí para no ensuciar con gangas si acaba de pasar algo gordo
+            return
+
+    # 2. GANGAS / OPORTUNIDADES (Lista de Transferencias Actual)
+    # Busca jugadores listados actualmente que sean muy rentables
     bargains = []
     if transfer_list:
         for league in transfer_list:
@@ -108,25 +147,47 @@ def analyze_and_notify(user_fcm_token, transfer_list, all_transfers, my_manager_
                 try:
                     price = float(p.get('price', 0))
                     value = float(p.get('value', 0))
+                    
                     if value > 0:
+                        # Ratio: Precio / Valor. Si es < 1.3 empieza a ser interesante.
+                        # Si es < 1.15 es una GANGA ABSOLUTA.
                         ratio = price / value
-                        if ratio <= 1.15: 
-                            profit = (value * 2.5) - price
-                            bargains.append(f"{p['name']} (+{profit:.1f}M)")
+                        
+                        if ratio <= 1.25: # Umbral un poco más laxo para encontrar más opciones, pero destacamos las top
+                            profit_potential = (value * 2.5) - price # Max venta approx
+                            bargains.append({
+                                'name': p['name'],
+                                'price': price,
+                                'value': value,
+                                'ratio': ratio,
+                                'profit': profit_potential
+                            })
                 except: continue
 
     if len(bargains) > 0:
-        best_bargain = bargains[0]
-        count = len(bargains)
-        if count == 1:
-            send_push(user_fcm_token, "🔥 ¡Oportunidad de Mercado!", f"Se encontró una ganga: {best_bargain}. ¡Cómpralo antes que vuele!")
-        else:
-            send_push(user_fcm_token, "🛒 Mercado Ardiendo", f"Se encontraron {count} gangas: {best_bargain} y más...")
-        return
+        # Ordenar por mejor ratio (menor es mejor)
+        bargains.sort(key=lambda x: x['ratio'])
+        best = bargains[0]
+        
+        # Solo notificamos si es realmente buena (ratio < 1.15) 
+        # O si es la única notificación que enviaremos hoy y es decente (<1.25)
+        
+        if best['ratio'] <= 1.15:
+            send_push(
+                user_fcm_token, 
+                "🔥 ¡GANGA DETECTADA!", 
+                f"{best['name']} está a la venta por {best['price']}M (Valor {best['value']}M). ¡Cómpralo ya!"
+            )
+            return
+        
+        # Si hay muchas "decentes"
+        elif len(bargains) >= 3:
+             send_push(
+                user_fcm_token, 
+                "🛒 Mercado Interesante", 
+                f"Hay oportunidades como {best['name']} ({best['price']}M) y otros en lista."
+            )
+             return
 
-    # 3. INFO
-    send_push(
-        user_fcm_token, 
-        "✅ Actualización Completada", 
-        "Los datos de tu liga han sido actualizados. Entra para ver el análisis."
-    )
+    # 3. INFO (Keep Alive - Opcional, comentar si molesta)
+    # print("ℹ️ Sin notificaciones relevantes por ahora.")
