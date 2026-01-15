@@ -401,29 +401,99 @@ def sync_matches(conn, matches_data, processed_leagues, user_id):
                 data_tuples.append((
                     user_id, league_id, m['round'], m['home_team'], m['home_manager'], 
                     m['away_team'], m['away_manager'], m['home_goals'], m['away_goals'], 
-                    json.dumps(m['events']), json.dumps(m['statistics']), json.dumps(m['ratings'])
+                    json.dumps(m['events']), json.dumps(m['statistics']), json.dumps(m['ratings']),
+                    m.get('referee'), m.get('referee_strictness')
                 ))
             
             if data_tuples:
+                # Deduplicate to avoid CardinalityViolation (ON CONFLICT constraint)
+                # Key: (league_id, round, home_team, away_team)
+                seen = set()
+                unique_tuples = []
+                for dt in data_tuples:
+                    # dt structure: (user_id, league_id, round, home, h_mgr, away, a_mgr, ...)
+                    # Indices: league_id=1, round=2, home=3, away=5
+                    key = (dt[1], dt[2], dt[3], dt[5])
+                    if key not in seen:
+                        seen.add(key)
+                        unique_tuples.append(dt)
+
                 sql = """
                     INSERT INTO public.matches (
                         user_id, league_id, round, home_team, home_manager, away_team, away_manager,
-                        home_goals, away_goals, events, statistics, ratings
+                        home_goals, away_goals, events, statistics, ratings, referee, referee_strictness
                     ) VALUES %s
                     ON CONFLICT (league_id, round, home_team, away_team) 
                     DO UPDATE SET
                         home_manager = EXCLUDED.home_manager, away_manager = EXCLUDED.away_manager,
                         home_goals = EXCLUDED.home_goals, away_goals = EXCLUDED.away_goals,
-                        events = EXCLUDED.events, statistics = EXCLUDED.statistics, ratings = EXCLUDED.ratings;
+                        events = EXCLUDED.events, statistics = EXCLUDED.statistics, ratings = EXCLUDED.ratings,
+                        referee = EXCLUDED.referee, referee_strictness = EXCLUDED.referee_strictness;
                 """
-                psycopg2.extras.execute_values(cur, sql, data_tuples)
-                print(f"  - Liga ID {league_id}: {len(data_tuples)} partidos.")
+                psycopg2.extras.execute_values(cur, sql, unique_tuples)
+                print(f"  - Liga ID {league_id}: {len(unique_tuples)} partidos.")
                 
     conn.commit()
 
 # ==========================================
 # 4. SEGURIDAD Y ORQUESTACIÓN
 # ==========================================
+
+def ensure_calendar_column_exists(conn):
+    """Auto-migration: Ensure user_leagues table has calendar_scraped column."""
+    with conn.cursor() as cur:
+        # Check if column exists
+        cur.execute("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='user_leagues' AND column_name='calendar_scraped';
+        """)
+        if not cur.fetchone():
+            print("🔧 Migrando BD: Agregando columna 'calendar_scraped'...")
+            cur.execute("ALTER TABLE user_leagues ADD COLUMN calendar_scraped BOOLEAN DEFAULT FALSE;")
+            conn.commit()
+
+def ensure_matches_columns_exist(conn):
+    """Auto-migration: Ensure matches table has referee columns."""
+    with conn.cursor() as cur:
+        # 1. Check referee
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='matches' AND column_name='referee';")
+        if not cur.fetchone():
+            print("🔧 Migrando BD: Agregando columna 'referee'...")
+            cur.execute("ALTER TABLE matches ADD COLUMN referee VARCHAR(255);")
+        
+        # 2. Check strictness
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='matches' AND column_name='referee_strictness';")
+        if not cur.fetchone():
+            print("🔧 Migrando BD: Agregando columna 'referee_strictness'...")
+            cur.execute("ALTER TABLE matches ADD COLUMN referee_strictness VARCHAR(50);")
+        conn.commit()
+
+def check_if_calendar_needed(conn, user_id):
+    """
+    Returns True if any active league for the user has not scraped the calendar yet.
+    """
+    ensure_calendar_column_exists(conn)
+    ensure_matches_columns_exist(conn) # Ensure matches schema is ready too
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT 1 FROM user_leagues 
+            WHERE user_id = %s AND is_active = TRUE AND calendar_scraped = FALSE 
+            LIMIT 1;
+        """, (user_id,))
+        return cur.fetchone() is not None
+
+def mark_calendar_as_scraped(conn, user_id, processed_leagues):
+    """Mark synced leagues as calendar_scraped = True"""
+    if not processed_leagues: return
+    
+    league_ids = [item['league_id'] for item in processed_leagues]
+    if not league_ids: return
+
+    with conn.cursor() as cur:
+        cur.execute("UPDATE user_leagues SET calendar_scraped = TRUE WHERE user_id = %s AND league_id IN %s", (user_id, tuple(league_ids)))
+    conn.commit()
+    print("📅 Calendario marcado como sincronizado para estas ligas.")
 
 def get_osm_credentials(conn, user_id):
     print(f"  - Obteniendo credenciales para el usuario ID: {user_id}...")
@@ -480,6 +550,17 @@ def run_update_for_user(user_id):
     conn = get_db_connection()
     if not conn: return
     
+    # 0. Determinar si necesitamos Calendario (Auto-detection)
+    try:
+        needs_calendar = check_if_calendar_needed(conn, user_id)
+        if needs_calendar:
+            print("📅 DETECTADO: Ligas nuevas/pendientes. Se activará el escaneo de calendario.")
+        else:
+            print("⏩ Calendario al día. Se escanearán solo resultados recientes.")
+    except Exception as e:
+        print(f"⚠️ Error verificando estado calendario: {e}")
+        needs_calendar = False
+
     # 1. Credenciales
     try:
         osm_username, osm_password, user_fcm_token = get_osm_credentials(conn, user_id)
@@ -509,7 +590,8 @@ def run_update_for_user(user_id):
             print("\n[1/3] 📡 Scraping...")
             transfer_list_data, fichajes_data = get_market_data(page)
             standings_data, squad_values_data = get_league_data(page)
-            matches_data = get_match_results(page)
+            # Pasamos la bandera calculada automáticamente
+            matches_data = get_match_results(page, scrape_future_fixtures=needs_calendar)
             print("✅ Scraping OK.")
     except Exception as e:
         print(f"❌ Error scraping: {e}")
@@ -549,15 +631,17 @@ def run_update_for_user(user_id):
             # F. Partidos
             if matches_data:
                 sync_matches(conn, matches_data, processed_leagues, user_id)
-
+                # Si activamos calendario, marcamos como completado para estas ligas
+                if needs_calendar:
+                    mark_calendar_as_scraped(conn, user_id, processed_leagues)
+            
             # 4. Notificaciones
             print("\n🔔 Notificaciones...")
             flat_transfers = [t for sublist in grouped.values() for t in sublist]
             analyze_and_notify(user_fcm_token, transfer_list_data, flat_transfers, osm_username)
 
             print("\n✨ FIN.")
-            break 
-
+            break
         except Exception as e:
             print(f"❌ Error sync (Intento {attempt+1}): {e}")
             if attempt < max_retries - 1: time.sleep(10)
