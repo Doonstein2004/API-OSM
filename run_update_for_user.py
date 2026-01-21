@@ -308,9 +308,18 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
     for item in processed_leagues:
         idx = item["data_index"]
         league_id = item["league_id"]
+        managed_team = item.get("managed_team", "")
         
         if idx >= len(fichajes_data): continue
         team_block = fichajes_data[idx] # Acceso directo por Slot
+        
+        # VALIDACIÓN CRÍTICA: Verificar que el bloque de fichajes corresponde al equipo correcto
+        block_team_name = team_block.get("team_name", "")
+        if block_team_name and managed_team:
+            # Normalizar para comparación (minúsculas y sin espacios extra)
+            if normalize_team_name(block_team_name) != normalize_team_name(managed_team):
+                print(f"    ⚠️ Mismatch detectado: fichajes de '{block_team_name}' no coinciden con liga de '{managed_team}'. Saltando.")
+                continue
 
         for transfer in team_block.get("transfers", []):
             try:
