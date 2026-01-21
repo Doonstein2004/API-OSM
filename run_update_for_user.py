@@ -184,7 +184,7 @@ def find_matching_active_league(conn, user_id, dashboard_name, current_managers_
                 best_id = row['id']
         
         if best_id:
-            match_found = best_ratio > 0.30 or (best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids)
+            match_found = best_ratio > 0.70 or (best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids)
             if match_found:
                 # Verificar si el usuario ya está vinculado a esta liga
                 cur.execute("SELECT 1 FROM user_leagues WHERE user_id = %s AND league_id = %s", (user_id, best_id))
