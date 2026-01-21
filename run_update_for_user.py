@@ -18,6 +18,8 @@ from notifications import init_firebase_admin, analyze_and_notify
 from scraper_league_details import get_league_data
 from scraper_market_data import get_market_data
 from scraper_match_results import get_match_results
+from scraper_tactics import get_tactics_data
+from scraper_next_match import get_next_match_info
 
 # --- CONFIGURACIÓN ---
 load_dotenv()
@@ -444,6 +446,262 @@ def sync_matches(conn, matches_data, processed_leagues, user_id):
                 
     conn.commit()
 
+def ensure_tactics_table_exists(conn):
+    """Auto-migration: Create match_tactics table if it doesn't exist."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT to_regclass('public.match_tactics');
+        """)
+        if cur.fetchone()[0] is None:
+            print("🔧 Migrando BD: Creando tabla 'match_tactics'...")
+            cur.execute("""
+                CREATE TABLE public.match_tactics (
+                    id SERIAL PRIMARY KEY,
+                    user_id UUID NOT NULL,
+                    league_id INTEGER NOT NULL REFERENCES leagues(id),
+                    round INTEGER NOT NULL,
+                    team_name VARCHAR(255) NOT NULL,
+                    
+                    -- Tácticas básicas
+                    game_plan VARCHAR(50),
+                    tackling VARCHAR(50),
+                    
+                    -- Sliders (0-100)
+                    pressure INTEGER,
+                    mentality INTEGER,
+                    tempo INTEGER,
+                    
+                    -- Tácticas de línea
+                    forwards_tactic VARCHAR(50),
+                    midfielders_tactic VARCHAR(50),
+                    defenders_tactic VARCHAR(50),
+                    
+                    -- Configuración adicional
+                    offside_trap BOOLEAN DEFAULT FALSE,
+                    marking VARCHAR(50),
+                    
+                    -- Metadatos
+                    scraped_at TIMESTAMP DEFAULT NOW(),
+                    
+                    -- Constraint para evitar duplicados
+                    CONSTRAINT unique_match_tactics UNIQUE (league_id, round, team_name)
+                );
+                
+                CREATE INDEX idx_tactics_league_round ON match_tactics(league_id, round);
+                CREATE INDEX idx_tactics_user ON match_tactics(user_id);
+            """)
+            conn.commit()
+            print("✅ Tabla 'match_tactics' creada correctamente.")
+
+def sync_tactics(conn, tactics_data, processed_leagues, user_id, current_round_map):
+    """
+    Sincroniza las tácticas extraídas en la base de datos.
+    
+    Args:
+        conn: Conexión a la base de datos
+        tactics_data: Lista de diccionarios con tácticas por equipo
+        processed_leagues: Lista de ligas procesadas con sus IDs
+        user_id: ID del usuario
+        current_round_map: Diccionario {league_name: round} con la jornada actual de cada liga
+    """
+    print("\n🎯 Sincronizando tácticas...")
+    ensure_tactics_table_exists(conn)
+    
+    with conn.cursor() as cur:
+        for item in processed_leagues:
+            idx = item["data_index"]
+            league_id = item["league_id"]
+            team_name = item.get("managed_team", "")
+            league_name = item.get("dashboard_name", "")
+            
+            if idx >= len(tactics_data):
+                continue
+            
+            tdata = tactics_data[idx]
+            
+            # Obtener la jornada actual para esta liga
+            current_round = current_round_map.get(league_name, 0)
+            if current_round == 0:
+                print(f"  ⚠️ No se pudo determinar la jornada para {league_name}. Saltando.")
+                continue
+            
+            # Preparar los datos para inserción
+            data_tuple = (
+                str(user_id),
+                league_id,
+                current_round,
+                team_name,
+                tdata.get("game_plan", "Unknown"),
+                tdata.get("tackling", "Unknown"),
+                tdata.get("pressure", 50),
+                tdata.get("mentality", 50),
+                tdata.get("tempo", 50),
+                tdata.get("forwards_tactic", "Unknown"),
+                tdata.get("midfielders_tactic", "Unknown"),
+                tdata.get("defenders_tactic", "Unknown"),
+                tdata.get("offside_trap", False),
+                tdata.get("marking", "Unknown"),
+            )
+            
+            sql = """
+                INSERT INTO public.match_tactics (
+                    user_id, league_id, round, team_name,
+                    game_plan, tackling, pressure, mentality, tempo,
+                    forwards_tactic, midfielders_tactic, defenders_tactic,
+                    offside_trap, marking, scraped_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (league_id, round, team_name)
+                DO UPDATE SET
+                    game_plan = EXCLUDED.game_plan,
+                    tackling = EXCLUDED.tackling,
+                    pressure = EXCLUDED.pressure,
+                    mentality = EXCLUDED.mentality,
+                    tempo = EXCLUDED.tempo,
+                    forwards_tactic = EXCLUDED.forwards_tactic,
+                    midfielders_tactic = EXCLUDED.midfielders_tactic,
+                    defenders_tactic = EXCLUDED.defenders_tactic,
+                    offside_trap = EXCLUDED.offside_trap,
+                    marking = EXCLUDED.marking,
+                    scraped_at = NOW();
+            """
+            cur.execute(sql, data_tuple)
+            print(f"  ✓ Tácticas guardadas: {team_name} (Jornada {current_round})")
+    
+    conn.commit()
+
+def ensure_scheduled_tasks_table_exists(conn):
+    """Auto-migration: Create scheduled_scrape_tasks table if it doesn't exist."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT to_regclass('public.scheduled_scrape_tasks');
+        """)
+        if cur.fetchone()[0] is None:
+            print("🔧 Migrando BD: Creando tabla 'scheduled_scrape_tasks'...")
+            cur.execute("""
+                CREATE TABLE public.scheduled_scrape_tasks (
+                    id SERIAL PRIMARY KEY,
+                    user_id UUID NOT NULL,
+                    task_type VARCHAR(50) NOT NULL,
+                    scheduled_at TIMESTAMP NOT NULL,
+                    status VARCHAR(20) DEFAULT 'pending',
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    executed_at TIMESTAMP,
+                    
+                    CONSTRAINT unique_pending_task UNIQUE (user_id, task_type, scheduled_at)
+                );
+                
+                CREATE INDEX idx_scheduled_tasks_pending ON scheduled_scrape_tasks(scheduled_at) 
+                    WHERE status = 'pending';
+                CREATE INDEX idx_scheduled_tasks_user ON scheduled_scrape_tasks(user_id);
+            """)
+            conn.commit()
+            print("✅ Tabla 'scheduled_scrape_tasks' creada correctamente.")
+
+def schedule_tactics_scrape(conn, user_id, next_match_info, processed_leagues):
+    """
+    Programa tareas de scraping de tácticas basándose en los próximos partidos.
+    
+    Args:
+        conn: Conexión a la base de datos
+        user_id: ID del usuario
+        next_match_info: Lista con info de próximos partidos (incluye countdown)
+        processed_leagues: Lista de ligas procesadas
+    """
+    print("\n📅 Programando scraping de tácticas...")
+    ensure_scheduled_tasks_table_exists(conn)
+    
+    # Crear un mapa de league_name -> league_id
+    league_id_map = {item["dashboard_name"]: item["league_id"] for item in processed_leagues}
+    
+    scheduled_count = 0
+    
+    with conn.cursor() as cur:
+        for match_info in next_match_info:
+            # Solo programar si hay tiempo restante (partido no ha empezado)
+            if match_info.get("seconds_remaining", 0) <= 0:
+                continue
+            
+            league_name = match_info.get("league_name")
+            league_id = league_id_map.get(league_name)
+            
+            if not league_id:
+                continue
+            
+            # Calcular cuándo hacer el scraping (5 minutos después de que empiece el partido)
+            scheduled_at = match_info.get("tactics_scrape_at")
+            if not scheduled_at:
+                continue
+            
+            # Preparar metadata
+            metadata = json.dumps({
+                "league_id": league_id,
+                "league_name": league_name,
+                "team_name": match_info.get("team_name"),
+                "matchday": match_info.get("matchday"),
+                "slot_index": match_info.get("slot_index")
+            })
+            
+            # Insertar o actualizar la tarea programada
+            sql = """
+                INSERT INTO public.scheduled_scrape_tasks (
+                    user_id, task_type, scheduled_at, status, metadata
+                ) VALUES (%s, 'tactics_scrape', %s, 'pending', %s)
+                ON CONFLICT (user_id, task_type, scheduled_at)
+                DO NOTHING;
+            """
+            cur.execute(sql, (str(user_id), scheduled_at, metadata))
+            
+            if cur.rowcount > 0:
+                scheduled_count += 1
+                print(f"  📌 Programado: {league_name} Jornada {match_info.get('matchday')} -> {scheduled_at.strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    conn.commit()
+    
+    if scheduled_count > 0:
+        print(f"✅ {scheduled_count} tareas de tácticas programadas.")
+    else:
+        print("ℹ️ No hay nuevas tareas de tácticas para programar.")
+
+def get_pending_tactics_tasks(conn, user_id):
+    """
+    Obtiene las tareas de scraping de tácticas pendientes que ya deberían ejecutarse.
+    
+    Returns:
+        list: Lista de tareas pendientes con sus metadatos
+    """
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT id, metadata, scheduled_at
+            FROM public.scheduled_scrape_tasks
+            WHERE user_id = %s 
+              AND task_type = 'tactics_scrape'
+              AND status = 'pending'
+              AND scheduled_at <= NOW()
+            ORDER BY scheduled_at;
+        """, (str(user_id),))
+        
+        tasks = []
+        for row in cur.fetchall():
+            task = {
+                "id": row['id'],
+                "metadata": row['metadata'] if isinstance(row['metadata'], dict) else json.loads(row['metadata'] or '{}'),
+                "scheduled_at": row['scheduled_at']
+            }
+            tasks.append(task)
+        
+        return tasks
+
+def mark_tactics_task_complete(conn, task_id):
+    """Marca una tarea de scraping de tácticas como completada."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE public.scheduled_scrape_tasks
+            SET status = 'completed', executed_at = NOW()
+            WHERE id = %s;
+        """, (task_id,))
+    conn.commit()
+
 # ==========================================
 # 4. SEGURIDAD Y ORQUESTACIÓN
 # ==========================================
@@ -580,12 +838,21 @@ def run_update_for_user(user_id):
         print(f"? Error DB: {e}")
         conn.close(); return
 
+    # Variables para almacenar datos scrapeados
+    transfer_list_data = []
+    fichajes_data = []
+    standings_data = []
+    squad_values_data = []
+    matches_data = []
+    tactics_data = []
+    next_match_info = []
+
     # 2. Scraping
     try:
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
             is_gha = os.getenv("GITHUB_ACTIONS") == "true"
-            browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True if is_gha else True, args=["--no-sandbox"])
             context = browser.new_context(viewport={'width': 1280, 'height': 720})
             page = context.new_page()
             
@@ -596,18 +863,27 @@ def run_update_for_user(user_id):
                 invalidate_user_credentials(conn, user_id)
                 conn.close(); return
 
-            print("\n[1/3] 📡 Scraping...")
+            print("\n[1/4] 📡 Scraping datos principales...")
             transfer_list_data, fichajes_data = get_market_data(page)
             standings_data, squad_values_data = get_league_data(page)
-            # Pasamos la bandera calculada automáticamente
             matches_data = get_match_results(page, scrape_future_fixtures=needs_calendar)
+            
+            print("\n[2/4] ⏱️ Obteniendo info de próximos partidos...")
+            next_match_info = get_next_match_info(page)
+            
+            print("\n[3/4] 🎯 Scraping tácticas actuales...")
+            tactics_data = get_tactics_data(page)
+            
             print("✅ Scraping OK.")
+            
     except Exception as e:
         print(f"❌ Error scraping: {e}")
+        import traceback
+        traceback.print_exc()
         return
 
     # 3. Sincronización
-    print("\n[2/3] 💾 Sincronizando BD...")
+    print("\n[4/4] 💾 Sincronizando BD...")
     max_retries = 3
     
     for attempt in range(max_retries):
@@ -640,9 +916,57 @@ def run_update_for_user(user_id):
             # F. Partidos
             if matches_data:
                 sync_matches(conn, matches_data, processed_leagues, user_id)
-                # Si activamos calendario, marcamos como completado para estas ligas
                 if needs_calendar:
                     mark_calendar_as_scraped(conn, user_id, processed_leagues)
+            
+            # G. Tácticas
+            if tactics_data:
+                # Crear mapa de jornadas actuales desde MÚLTIPLES FUENTES
+                # Prioridad: 1) next_match_info, 2) standings (partidos jugados), 3) matches (max round)
+                current_round_map = {}
+                
+                # Fuente 1: next_match_info (si tiene countdown activo, es la próxima jornada)
+                for m in (next_match_info or []):
+                    if m.get("matchday", 0) > 0:
+                        current_round_map[m["league_name"]] = m["matchday"]
+                
+                # Fuente 2: standings_data (usar partidos jugados como jornada actual)
+                for idx, item in enumerate(processed_leagues):
+                    league_name = item.get("dashboard_name", "")
+                    if league_name not in current_round_map or current_round_map[league_name] == 0:
+                        if idx < len(standings_data):
+                            standings = standings_data[idx].get("standings", [])
+                            if standings:
+                                # Jornada actual = max de partidos jugados en la clasificación
+                                max_played = max((s.get("Played", 0) for s in standings), default=0)
+                                if max_played > 0:
+                                    current_round_map[league_name] = max_played
+                                    print(f"    ℹ️ Jornada para '{league_name}' obtenida de standings: {max_played}")
+                
+                # Fuente 3: matches_data (max round de los partidos)
+                for idx, item in enumerate(processed_leagues):
+                    league_name = item.get("dashboard_name", "")
+                    if league_name not in current_round_map or current_round_map[league_name] == 0:
+                        if matches_data and idx < len(matches_data):
+                            matches = matches_data[idx].get("matches", [])
+                            if matches:
+                                max_round = max((m.get("round", 0) for m in matches), default=0)
+                                if max_round > 0:
+                                    current_round_map[league_name] = max_round
+                                    print(f"    ℹ️ Jornada para '{league_name}' obtenida de matches: {max_round}")
+                
+                if current_round_map:
+                    sync_tactics(conn, tactics_data, processed_leagues, user_id, current_round_map)
+                else:
+                    print("⚠️ No se pudo determinar jornadas actuales. Saltando sync de tácticas.")
+            
+            # H. Programar scraping futuro de tácticas (solo si hay countdown activo)
+            if next_match_info:
+                active_countdowns = [m for m in next_match_info if m.get("seconds_remaining", 0) > 0]
+                if active_countdowns:
+                    schedule_tactics_scrape(conn, user_id, next_match_info, processed_leagues)
+                else:
+                    print("ℹ️ No hay partidos pendientes. No se programan tareas de tácticas.")
             
             # 4. Notificaciones
             print("\n🔔 Notificaciones...")

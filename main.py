@@ -264,6 +264,162 @@ def refresh_standings_league():
         raise HTTPException(status_code=500, detail=f"Error al ejecutar el scraper de valores: {str(e)}")
 
 
+# --- ENDPOINTS DE TÁCTICAS ---
+
+class MatchTacticsResponse(CamelModel):
+    id: int
+    league_id: int
+    round: int
+    team_name: str
+    game_plan: Optional[str] = None
+    tackling: Optional[str] = None
+    pressure: Optional[int] = None
+    mentality: Optional[int] = None
+    tempo: Optional[int] = None
+    forwards_tactic: Optional[str] = None
+    midfielders_tactic: Optional[str] = None
+    defenders_tactic: Optional[str] = None
+    offside_trap: Optional[bool] = None
+    marking: Optional[str] = None
+    scraped_at: Optional[datetime.datetime] = None
 
 
+@app.get("/api/leagues/{league_id}/tactics", response_model=List[MatchTacticsResponse], response_model_by_alias=True)
+def get_league_tactics(league_id: int, round: Optional[int] = None):
+    """
+    Obtiene las tácticas registradas para una liga.
+    Opcionalmente filtra por jornada.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            if round:
+                cur.execute("""
+                    SELECT id, league_id, round, team_name, game_plan, tackling, 
+                           pressure, mentality, tempo, forwards_tactic, midfielders_tactic, 
+                           defenders_tactic, offside_trap, marking, scraped_at
+                    FROM match_tactics 
+                    WHERE league_id = %s AND round = %s
+                    ORDER BY team_name;
+                """, (league_id, round))
+            else:
+                cur.execute("""
+                    SELECT id, league_id, round, team_name, game_plan, tackling, 
+                           pressure, mentality, tempo, forwards_tactic, midfielders_tactic, 
+                           defenders_tactic, offside_trap, marking, scraped_at
+                    FROM match_tactics 
+                    WHERE league_id = %s
+                    ORDER BY round DESC, team_name;
+                """, (league_id,))
+            
+            tactics_data = cur.fetchall()
+            return [dict(row) for row in tactics_data]
+    except psycopg2.Error as e:
+        # La tabla puede no existir todavía
+        if "does not exist" in str(e):
+            return []
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+class ScheduledTaskResponse(CamelModel):
+    id: int
+    user_id: str
+    task_type: str
+    scheduled_at: datetime.datetime
+    status: str
+    metadata: Optional[dict] = None
+    created_at: Optional[datetime.datetime] = None
+    executed_at: Optional[datetime.datetime] = None
+
+
+@app.get("/api/scheduled-tasks", response_model=List[ScheduledTaskResponse], response_model_by_alias=True)
+def get_scheduled_tasks(status: Optional[str] = "pending", task_type: Optional[str] = None):
+    """
+    Obtiene las tareas programadas.
+    Filtra por status (pending, completed, failed) y/o tipo de tarea.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            query = """
+                SELECT id, user_id::text, task_type, scheduled_at, status, metadata, created_at, executed_at
+                FROM scheduled_scrape_tasks
+                WHERE 1=1
+            """
+            params = []
+            
+            if status:
+                query += " AND status = %s"
+                params.append(status)
+            
+            if task_type:
+                query += " AND task_type = %s"
+                params.append(task_type)
+            
+            query += " ORDER BY scheduled_at DESC LIMIT 100;"
+            
+            cur.execute(query, params)
+            tasks = cur.fetchall()
+            return [dict(row) for row in tasks]
+    except psycopg2.Error as e:
+        if "does not exist" in str(e):
+            return []
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
+
+
+@app.post("/run-scheduled-tactics", dependencies=[Security(get_api_key)])
+def trigger_scheduled_tactics():
+    """
+    Ejecuta manualmente el procesamiento de tareas de tácticas programadas.
+    Útil para disparar el procesamiento bajo demanda.
+    """
+    try:
+        from run_scheduled_tactics import run_scheduled_tactics
+        run_scheduled_tactics()
+        return {"status": "success", "message": "Tareas de tácticas procesadas."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error ejecutando tareas programadas: {str(e)}")
+
+
+@app.get("/api/next-matches/{user_id}")
+def get_user_next_matches(user_id: str, api_key: str = Security(get_api_key)):
+    """
+    Obtiene información de los próximos partidos programados para un usuario.
+    Incluye la información del countdown y cuándo se ejecutará el scraping de tácticas.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, task_type, scheduled_at, status, metadata, created_at
+                FROM scheduled_scrape_tasks
+                WHERE user_id = %s 
+                  AND task_type = 'tactics_scrape' 
+                  AND status = 'pending'
+                ORDER BY scheduled_at;
+            """, (user_id,))
+            
+            tasks = cur.fetchall()
+            return {
+                "user_id": user_id,
+                "pending_tactics_scrapes": [
+                    {
+                        "id": row['id'],
+                        "scheduled_at": row['scheduled_at'].isoformat() if row['scheduled_at'] else None,
+                        "metadata": row['metadata'],
+                        "created_at": row['created_at'].isoformat() if row['created_at'] else None
+                    }
+                    for row in tasks
+                ]
+            }
+    except psycopg2.Error as e:
+        if "does not exist" in str(e):
+            return {"user_id": user_id, "pending_tactics_scrapes": []}
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
 

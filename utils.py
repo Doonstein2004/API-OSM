@@ -9,32 +9,60 @@ class InvalidCredentialsError(Exception):
 
 def handle_popups(page: Page):
     """
-    Versión v3.3: Especializada en matar modales sociales y bloqueos de transición.
+    Versión v4.0: Cierra modales de forma más agresiva.
+    Incluye reintentos y manejo de modales que bloquean interacción.
     """
     # 1. Inyectamos CSS agresivo para ocultar elementos sociales y bloqueadores
-    # Añadido: .social-login-modal, #social-login-container, .facebook-login-button
-    page.add_style_tag(content="""
-        #preloader-image, .modal-backdrop, #genericModalContainer, 
-        .social-login-modal, #social-login-container, .facebook-login-button, 
-        iframe[src*="facebook"], #manager-social-login { 
-            display: none !important; 
-            visibility: hidden !important; 
-            pointer-events: none !important; 
-        }
-    """)
+    try:
+        page.add_style_tag(content="""
+            #preloader-image, .modal-backdrop, #genericModalContainer, 
+            .social-login-modal, #social-login-container, .facebook-login-button, 
+            iframe[src*="facebook"], #manager-social-login { 
+                display: none !important; 
+                visibility: hidden !important; 
+                pointer-events: none !important; 
+            }
+        """)
+    except:
+        pass
     
-    # 2. JS para cerrar activamente cualquier modal que use la clase 'in' (visible en Bootstrap)
-    # y eliminar el preloader si se quedó pegado.
+    # 2. JS para cerrar activamente cualquier modal visible
     try:
         page.evaluate("""
+            // Cerrar modales con click en close button
             document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
-                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss="modal"]');
-                if (closeBtn) closeBtn.click();
-                else modal.remove();
+                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss="modal"], .close-button-container button');
+                if (closeBtn) {
+                    closeBtn.click();
+                }
             });
+            
+            // Eliminar backdrops y preloaders
             document.querySelectorAll('#preloader-image, .modal-backdrop').forEach(el => el.remove());
+            
+            // Forzar cierre de modales que no respondieron al click
+            setTimeout(() => {
+                document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
+                    modal.classList.remove('in', 'show');
+                    modal.style.display = 'none';
+                });
+                document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+                document.body.classList.remove('modal-open');
+                document.body.style.overflow = '';
+                document.body.style.paddingRight = '';
+            }, 100);
         """)
-    except: pass
+    except:
+        pass
+    
+    # 3. Fallback: presionar Escape para cerrar modales
+    try:
+        modal_visible = page.locator(".modal.in, .modal.show")
+        if modal_visible.count() > 0:
+            page.keyboard.press("Escape")
+            time.sleep(0.2)
+    except:
+        pass
     
 def safe_navigate(page: Page, url: str, verify_selector: str = None, max_retries=3):
     """
