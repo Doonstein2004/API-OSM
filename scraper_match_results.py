@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import re
 from dotenv import load_dotenv
 from playwright.sync_api import TimeoutError, Error as PlaywrightError
 from utils import handle_popups, safe_int, safe_navigate
@@ -9,157 +10,193 @@ load_dotenv()
 
 def get_match_results(page, scrape_future_fixtures=False):
     """
-    Extrae los resultados.
-    Si scrape_future_fixtures=True, recorre todas las jornadas disponibles.
-    Si False, solo la actual por defecto.
+    Extrae los resultados. V2.1 Debug Mode.
     """
-
-    # --- INTERNAL HELPER TO SCRAPE A ROUND ---
-    def scrape_current_round(page, round_element_idx=None):
-        matches_list = []
+    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V2.1 (DEBUG) ---")
+    
+    try:
+        MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
+        RESULTS_URL = "https://en.onlinesoccermanager.com/League/Results"
         
-        # 1. Detect Round Number or Cup
-        # Determine if it's a cup round by checking the active item or passed index
-        # NOTE: When scraping future, the active item is what we clicked.
-        
-        try:
-            # We look at the "header" of the round list (the slidee items are just numbers/icons)
-            # The text "Matchday X" is usually in the summary or we imply it.
-            # But simpler: check the th header.
-            header_span = page.locator("th.text-center span[data-bind*='weekNr']")
-            if header_span.count() > 0:
-                week_text = header_span.inner_text()
-                round_number = safe_int(week_text)
-            else:
-                # Might be Cup
-                round_number = -1 # ID for Cup
-        except:
-            round_number = 0
+        all_leagues_matches = []
+        NUM_SLOTS = 4
 
-        # Check for "Draw wasn't conducted" (Empty Cup Round)
-        if page.locator("td:has-text(\"This Cup round's draw wasn't conducted yet\")").count() > 0:
-             print(f"  - Jornada {round_number} (Copa): Sorteo no realizado. Saltando.")
-             return []
-
-        # Check for "No fixtures" message (Pre-season or unknown)
-        if page.locator("td.text-center:has-text('There are no Fixtures')").count() > 0:
-             print(f"  - Jornada {round_number}: Sin partidos (Pre-season/Empty).")
-             return []
-
-        # Contar filas
-        # Sometimes rows are .clickable, sometimes not (unplayed)
-        row_count = page.locator("table.table-sticky tbody tr").count()
-        print(f"  - Encontrados {row_count} partidos en la jornada {round_number}.")
-
-        for j in range(row_count):
-            row = page.locator("table.table-sticky tbody tr").nth(j) 
-            # Note: Removed .clickable constraint to ensure we catch all
-            # Start checks to see if it's a real match row
-            if row.locator("td.td-home").count() == 0: continue
-
-            row.scroll_into_view_if_needed()
+        # Función auxiliar
+        def scrape_current_round(page, round_element_idx=None):
+            matches_list = []
             
-            # --- 1. EXTRACCIÓN SEGURA DE DATOS BÁSICOS ---
-            home_team = row.locator("td.td-home .font-sm").inner_text().strip()
-            away_team = row.locator("td.td-away .font-sm").inner_text().strip()
-            
-            h_mgr_loc = row.locator("td.td-home .text-secondary")
-            home_manager = h_mgr_loc.first.inner_text().strip() if h_mgr_loc.count() > 0 else "CPU"
-            
-            a_mgr_loc = row.locator("td.td-away .text-secondary")
-            away_manager = a_mgr_loc.first.inner_text().strip() if a_mgr_loc.count() > 0 else "CPU"
-
-            # Referee
-            ref_loc = row.locator("td.td-round .referee-name")
-            referee_name = ref_loc.inner_text().strip() if ref_loc.count() > 0 else ""
-            
-            ref_strictness = "Unknown"
-            strict_map = {
-                "verylenient": "Very Lenient",
-                "lenient": "Lenient",
-                "average": "Average", 
-                "strict": "Strict",
-                "verystrict": "Very Strict"
-            }
-            # Check class of icon
-            for cls, name in strict_map.items():
-                if row.locator(f".icon-referee.{cls}").count() > 0:
-                    ref_strictness = name
-                    break
-
-            # Init vars
-            home_goals = 0
-            away_goals = 0
-            events = []
-            stats = {}
-            ratings = {"home": [], "away": []}
-            is_played = False
-
-            # Check if played
-            # Una partida jugada muestra el resultado en lugar de fecha/hora
-            is_played_visually = False
+            # Detectar Jornada
             try:
-                # Verificar primero si existe la columna de score
-                score_el = row.locator("td.td-score")
-                if score_el.count() > 0:
-                    score_col = score_el.inner_text(timeout=1000).strip()
-                    # Heurística: Si tiene guión y no tiene dos puntos (hora), es un resultado
-                    is_played_visually = "-" in score_col and ":" not in score_col
+                header_span = page.locator("th.text-center span[data-bind*='weekNr']")
+                if header_span.count() > 0:
+                    round_number = safe_int(header_span.inner_text())
                 else:
-                    # Fallback: Usar la lógica antigua del referee-container
-                    # Si NO hay referee container visible en la celda round, asumimos que se jugó (o el diseño cambió)
-                    is_played_visually = row.locator("td.td-round .referee-container").count() == 0
-            except Exception:
-                # Si falla algo, fallback seguro
-                is_played_visually = row.locator("td.td-round .referee-container").count() == 0
+                    round_number = 0
+            except:
+                round_number = 0
+            
+            # Contar filas
+            rows = page.locator("table.table-sticky tbody tr")
+            row_count = rows.count()
+            print(f"  - Encontrados {row_count} filas (Jornada {round_number}).")
 
-            # If it is played, we try to get more details
-            if is_played_visually: 
-                print(f"    🔍 Extrayendo detalles para {home_team} vs {away_team}...")
+            for j in range(row_count):
+                row = rows.nth(j)
+                
+                # Verificar si es una fila de partido válida
+                if row.locator("td.td-home").count() == 0: continue
+
+                row.scroll_into_view_if_needed()
+                
+                # --- DATOS BÁSICOS ---
+                home_team = row.locator("td.td-home .font-sm").inner_text().strip()
+                away_team = row.locator("td.td-away .font-sm").inner_text().strip()
+                
+                # Mánagers
+                h_mgr_loc = row.locator("td.td-home .text-secondary")
+                home_manager = h_mgr_loc.first.inner_text().strip() if h_mgr_loc.count() > 0 else "CPU"
+                
+                a_mgr_loc = row.locator("td.td-away .text-secondary")
+                away_manager = a_mgr_loc.first.inner_text().strip() if a_mgr_loc.count() > 0 else "CPU"
+
+                # Detección de partido jugado
+                is_played = False
+                home_goals = 0
+                away_goals = 0
+                score_text = ""
+                
+                # --- DEBUG ROW CONTENT ---
+                # row_text = row.inner_text()
+                # print(f"    [ROW RAW] {row_text.replace(chr(10), ' | ')}")
+
                 try:
-                    # Asegurar que no hay modales bloqueando
-                    handle_popups(page)
+                    # Intento 1: Clase estándar
+                    score_el = row.locator("td.td-score")
                     
-                    row.click(force=True)
-                    try:
-                        page.wait_for_selector(".modal-content", state="visible", timeout=3000)
-                    except TimeoutError:
-                        print("      ⚠️ Timeout esperando modal de detalles. Intentando click de nuevo...")
-                        row.click(force=True)
-                        page.wait_for_selector(".modal-content", state="visible", timeout=3000)
+                    # Intento 2: Clase alternativa (a veces cambia)
+                    if score_el.count() == 0:
+                        score_el = row.locator("td.match-score")
                     
-                    # --- A. EXTRAER EVENTOS ---
-                    try:
-                        event_rows = page.locator(".modal-content table.table-match-events tbody tr")
-                        # Esperar un poco a que carguen las filas si es necesario
-                        if event_rows.count() == 0:
-                            time.sleep(0.5)
+                    # Intento 3: Por posición (normalmente es la 3ra td: Home, Score/Time, Away)
+                    # Ojo: nth-child es 1-based. Home=1, Score=2 (si no hay round visual) o 3.
+                    if score_el.count() == 0:
+                        # Buscamos cualquier TD que tenga un guion o dos puntos
+                        tds = row.locator("td")
+                        for k in range(tds.count()):
+                            txt = tds.nth(k).inner_text().strip()
+                            if ("-" in txt or ":" in txt) and len(txt) < 10: # Score or Time
+                                score_el = tds.nth(k)
+                                break
+                    
+                    if score_el.count() > 0:
+                        score_text = score_el.first.inner_text().strip()
+                        print(f"    [DEBUG] Fila {j}: {home_team} vs {away_team} | ScoreDetected='{score_text}'")
                         
+                        # Cualquier cosa que parezca numérico + separador + numérico
+                        nums = re.findall(r'\d+', score_text)
+                        
+                        if len(nums) >= 2 and ":" not in score_text:
+                            is_played = True
+                            home_goals = int(nums[0])
+                            away_goals = int(nums[1])
+                        elif "-" in score_text and ":" not in score_text:
+                             is_played = True
+                             parts = score_text.split("-")
+                             if len(parts) == 2:
+                                home_goals = safe_int(parts[0])
+                                away_goals = safe_int(parts[1])
+                    else:
+                        print(f"    ⚠️ [DEBUG] No se encontró celda de score para {home_team} vs {away_team}")
+
+                except Exception as e:
+                    print(f"    ⚠️ Error leyendo score: {e}")
+
+                # Referee
+                referee_name = ""
+                try:
+                    ref_loc = row.locator("td.td-round .referee-name")
+                    if ref_loc.count() > 0:
+                        referee_name = ref_loc.inner_text().strip()
+                except: pass
+
+                events = []
+                stats = {}
+                ratings = {"home": [], "away": []}
+
+                # --- EXTRAER DETALLES ---
+                if is_played:
+                    try:
+                        print(f"    🔍 Extrayendo detalles para {home_team} vs {away_team}...")
+                        handle_popups(page)
+                        
+                        # INTENTO DE CLICK MEJORADO
+                        # 1. Clicar específicamente en el score, suele ser más efectivo
+                        target_click = row.locator("td.td-score, td.match-score").first
+                        if target_click.count() == 0: target_click = row # Fallback a fila completa
+                        
+                        try:
+                            target_click.click(timeout=1000) # Clic normal primero (dispara eventos JS mejor)
+                        except:
+                            target_click.click(force=True) # Fallback force
+                        
+                        # Esperar carga del modal
+                        try:
+                            # Esperar selector específico de contenido para confirmar carga
+                            page.wait_for_selector(".modal-content table.table-match-events", state="visible", timeout=4000)
+                        except:
+                            # Si falla, verificar si abrió al menos el contenedor del modal
+                            if page.locator(".modal-content").is_visible():
+                                pass # Abrió pero quizas no hay eventos (0-0 sin tarjetas)
+                            else:
+                                # Reintentar click si no abrió nada
+                                print("      ⚠️ Modal no abrió. Reintentando click...")
+                                target_click.click(force=True)
+                                page.wait_for_selector(".modal-content", state="visible", timeout=3000)
+                            
+                        # --- EVENTOS (Lógica Iconos Clasica) ---
+                        event_rows = page.locator(".modal-content table.table-match-events tbody tr")
                         item_count = event_rows.count()
                         print(f"      - Eventos encontrados: {item_count}")
-                        
+
                         for e_idx in range(item_count):
                             e_row = event_rows.nth(e_idx)
+                            
                             min_loc = e_row.locator(".td-event-home-minute, .td-event-away-minute").first
-                            if min_loc.count() > 0:
-                                minute = safe_int(min_loc.inner_text())
-                                h_icon = e_row.locator(".td-event-home-icon").inner_html() if e_row.locator(".td-event-home-icon").count() > 0 else ""
-                                a_icon = e_row.locator(".td-event-away-icon").inner_html() if e_row.locator(".td-event-away-icon").count() > 0 else ""
-                                full_icon = (h_icon + a_icon).lower()
-                                
-                                event_type = "other"
-                                if "goal" in full_icon: event_type = "goal"
-                                elif "yellowcard" in full_icon: event_type = "yellow_card"
-                                elif "redcard" in full_icon: event_type = "red_card"
-                                
-                                team_side = "home" if e_row.locator("td.td-event-home-names div").count() > 0 else "away"
-                                p_name = e_row.locator(".semi-bold").first.inner_text().strip() if e_row.locator(".semi-bold").count() > 0 else ""
-                                
-                                events.append({"minute": minute, "type": event_type, "side": team_side, "player": p_name})
+                            if min_loc.count() == 0: continue
+                            minute = safe_int(min_loc.inner_text())
 
-                        # Stats
+                            h_icon = e_row.locator(".td-event-home-icon").inner_html() if e_row.locator(".td-event-home-icon").count() > 0 else ""
+                            a_icon = e_row.locator(".td-event-away-icon").inner_html() if e_row.locator(".td-event-away-icon").count() > 0 else ""
+                            full_icon = (h_icon + a_icon).lower()
+
+                            event_type = "other"
+                            # Mapeo exhaustivo
+                            if "goal" in full_icon: event_type = "goal"
+                            elif "card-yellow" in full_icon or "yellowcard" in full_icon: event_type = "yellow_card"
+                            elif "card-red" in full_icon or "redcard" in full_icon: event_type = "red_card"
+                            elif "injury" in full_icon: event_type = "injury"
+                            elif "substitution" in full_icon or "sub" in full_icon: event_type = "substitution"
+                            elif "missed" in full_icon or "penalty" in full_icon: event_type = "missed_penalty"
+
+                            team_side = "home" if e_row.locator("td.td-event-home-names div").count() > 0 else "away"
+
+                            player_name = ""
+                            if e_row.locator(".semi-bold").count() > 0:
+                                player_name = e_row.locator(".semi-bold").first.inner_text().strip()
+                            else:
+                                detail_loc = e_row.locator(f"td.td-event-{team_side}-names div div:not(.semi-bold)")
+                                if detail_loc.count() > 0:
+                                    player_name = detail_loc.first.inner_text().strip()
+
+                            events.append({
+                                "minute": minute,
+                                "type": event_type,
+                                "side": team_side,
+                                "player": player_name
+                            })
+
+                        # --- ESTADÍSTICAS ---
                         stat_rows = page.locator("#table-match-statistics > tbody > tr")
-                        print(f"      - Estadísticas encontradas: {stat_rows.count()}")
                         for s_idx in range(stat_rows.count()):
                             s_row = stat_rows.nth(s_idx)
                             if s_row.locator(".td-match-stat-title").count() > 0:
@@ -169,65 +206,43 @@ def get_match_results(page, scrape_future_fixtures=False):
                                     "away": s_row.locator(".td-match-stat-away").inner_text().strip()
                                 }
                         
-                        # Score
-                        score_text_el = page.locator(".modal-content .match-score")
-                        if score_text_el.count() > 0:
-                            score_text = score_text_el.inner_text().strip()
-                            if "-" in score_text:
-                                p = score_text.split("-")
-                                home_goals = safe_int(p[0])
-                                away_goals = safe_int(p[1])
-
-                        # Close modal - Robust way
+                        # --- CERRAR MODAL ---
+                        closed = False
                         close_btn = page.locator(".close-button-container button.close, .modal.in button.close, [data-dismiss='modal']")
                         if close_btn.count() > 0 and close_btn.first.is_visible():
-                            close_btn.first.click()
-                        else: 
-                            page.keyboard.press("Escape")
+                            close_btn.first.click(timeout=1000, force=True)
+                            closed = True
                         
-                        page.wait_for_selector(".modal-content", state="hidden", timeout=3000)
+                        if not closed: page.keyboard.press("Escape")
+                        
+                        try:
+                            page.wait_for_selector(".modal-content", state="hidden", timeout=2000)
+                        except:
+                            page.keyboard.press("Escape")
 
-                    except Exception as inner_e:
-                        print(f"      ⚠️ Error procesando contenido del modal: {inner_e}")
-                        # Force close if failed inside
+                    except Exception as e:
+                        print(f"    ⚠️ Error detalles: {e}")
                         page.keyboard.press("Escape")
 
-                except Exception as e:
-                    print(f"    ⚠️ Error detail grab ({home_team} vs {away_team}): {e}")
-                    # Ensure modal is gone
-                    page.keyboard.press("Escape")
-            else:
-                # FUTURE MATCH
-                # We already have referee, teams, managers.
-                pass
+                matches_list.append({
+                    "round": round_number,
+                    "home_team": home_team,
+                    "home_manager": home_manager,
+                    "away_team": away_team,
+                    "away_manager": away_manager,
+                    "home_goals": home_goals,
+                    "away_goals": away_goals,
+                    "is_played": is_played,
+                    "referee": referee_name,
+                    "referee_strictness": "Unknown",
+                    "events": events,
+                    "statistics": stats,
+                    "ratings": ratings
+                })
 
-            matches_list.append({
-                "round": round_number,
-                "home_team": home_team,
-                "home_manager": home_manager,
-                "away_team": away_team,
-                "away_manager": away_manager,
-                "home_goals": home_goals,
-                "away_goals": away_goals,
-                "is_played": is_played_visually,
-                "referee": referee_name,
-                "referee_strictness": ref_strictness,
-                "events": events,
-                "statistics": stats,
-                "ratings": ratings
-            })
-            
-        return matches_list
+            return matches_list
 
-
-    # --- MAIN LOOP ---
-    try:
-        MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
-        RESULTS_URL = "https://en.onlinesoccermanager.com/League/Results"
-        
-        all_leagues_matches = []
-        NUM_SLOTS = 4
-
+        # --- LOOP PRINCIPAL ---
         for i in range(NUM_SLOTS):
             print(f"\n--- Analizando Resultados - Slot #{i + 1} ---")
             
@@ -256,44 +271,14 @@ def get_match_results(page, scrape_future_fixtures=False):
                     continue
                 
                 league_matches = []
+                # Siempre scrapeamos la actual (que debería ser el último resultado)
+                round_data = scrape_current_round(page)
+                league_matches.extend(round_data)
 
-                if scrape_future_fixtures:
-                    # Iterate through ALL rounds
-                    # Locate the slider items
-                    rounds_locator = page.locator("#round-sly-container ul.slidee li.round-item")
-                    count_rounds = rounds_locator.count()
-                    print(f"  - Calendario detectado: {count_rounds} jornadas totales.")
-                    
-                    for r_idx in range(count_rounds):
-                        r_item = rounds_locator.nth(r_idx)
-                        
-                        # --- SCROLL FIX: Use JS to force scroll ---
-                        try:
-                            r_item.evaluate("el => el.scrollIntoView({block: 'center', inline: 'center'})")
-                            # Short wait for animation
-                            time.sleep(0.2)
-                            if not r_item.is_visible():
-                                print(f"    ⚠️ Item {r_idx} no visible tras scroll. Intentando forzar...")
-                            
-                            r_item.click(force=True)
-                            time.sleep(1) # Safety wait for transition
-                            
-                            round_data = scrape_current_round(page, round_element_idx=r_idx)
-                            league_matches.extend(round_data)
-                        except Exception as e:
-                            print(f"    ❌ Error clicando jornada {r_idx}: {e}")
-                            
-                else:
-                    # Original behavior: just scrape what is there (Current/Last Played)
-                    round_data = scrape_current_round(page)
-                    league_matches.extend(round_data)
-
-                # Deduplicate locally (Safety net)
+                # Deduplicate
                 unique_lm = []
                 seen_local = set()
                 for m in league_matches:
-                    # Key: Round + Home + Away
-                    # Sometimes round is 0 or -1, so teams are the best key
                     k = (m['round'], m['home_team'], m['away_team'])
                     if k not in seen_local:
                         seen_local.add(k)
@@ -310,10 +295,10 @@ def get_match_results(page, scrape_future_fixtures=False):
                 continue
 
         return all_leagues_matches
+
     except Exception as e:
-        print(f"❌ Error crítico: {e}")
+        print(f"❌ Error crítico en scraper: {e}")
         return []
 
 if __name__ == "__main__":
-    # Bloque para testear individualmente (requiere sesión activa)
-    print("Este módulo está diseñado para ser importado y recibir el objeto 'page'.")
+    print("Este módulo está diseñado para ser importado.")

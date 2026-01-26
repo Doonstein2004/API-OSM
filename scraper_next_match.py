@@ -213,7 +213,8 @@ def extract_next_match_from_dashboard(page: Page) -> dict:
     }
     
     # Pequeña espera para que cargue todo el contenido dinámico
-    time.sleep(0.5)
+    # El dashboard puede tardar en renderizar el next-match-info-container
+    time.sleep(1.5)
     
     # === CERRAR MODALES PRIMERO ===
     handle_popups(page)
@@ -221,6 +222,12 @@ def extract_next_match_from_dashboard(page: Page) -> dict:
     handle_popups(page)  # Segunda pasada por si quedó alguno
     
     # === MÉTODO 1: Buscar en .next-match-info-container (Dashboard principal) ===
+    # Intentar esperar a que el contenedor principal aparezca, damos prioridad a esto
+    try:
+        page.wait_for_selector(".next-match-info-container .matchday-title", state="visible", timeout=4000)
+    except:
+        pass # Si no aparece, seguimos buscando con los otros métodos
+
     try:
         # Jornada: dentro de .next-match-info-container
         matchday_selectors = [
