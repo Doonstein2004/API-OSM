@@ -96,19 +96,49 @@ def get_match_results(page, scrape_future_fixtures=False):
             is_played = False
 
             # Check if played
-            is_played_visually = row.locator("td.td-round .referee-container").count() == 0
+            # Una partida jugada muestra el resultado en lugar de fecha/hora
+            is_played_visually = False
+            try:
+                # Verificar primero si existe la columna de score
+                score_el = row.locator("td.td-score")
+                if score_el.count() > 0:
+                    score_col = score_el.inner_text(timeout=1000).strip()
+                    # Heurística: Si tiene guión y no tiene dos puntos (hora), es un resultado
+                    is_played_visually = "-" in score_col and ":" not in score_col
+                else:
+                    # Fallback: Usar la lógica antigua del referee-container
+                    # Si NO hay referee container visible en la celda round, asumimos que se jugó (o el diseño cambió)
+                    is_played_visually = row.locator("td.td-round .referee-container").count() == 0
+            except Exception:
+                # Si falla algo, fallback seguro
+                is_played_visually = row.locator("td.td-round .referee-container").count() == 0
 
             # If it is played, we try to get more details
             if is_played_visually: 
-                # (Existing logic for played matches)
+                print(f"    🔍 Extrayendo detalles para {home_team} vs {away_team}...")
                 try:
+                    # Asegurar que no hay modales bloqueando
+                    handle_popups(page)
+                    
                     row.click(force=True)
-                    page.wait_for_selector(".modal-content", state="visible", timeout=5000)
+                    try:
+                        page.wait_for_selector(".modal-content", state="visible", timeout=3000)
+                    except TimeoutError:
+                        print("      ⚠️ Timeout esperando modal de detalles. Intentando click de nuevo...")
+                        row.click(force=True)
+                        page.wait_for_selector(".modal-content", state="visible", timeout=3000)
                     
                     # --- A. EXTRAER EVENTOS ---
                     try:
                         event_rows = page.locator(".modal-content table.table-match-events tbody tr")
-                        for e_idx in range(event_rows.count()):
+                        # Esperar un poco a que carguen las filas si es necesario
+                        if event_rows.count() == 0:
+                            time.sleep(0.5)
+                        
+                        item_count = event_rows.count()
+                        print(f"      - Eventos encontrados: {item_count}")
+                        
+                        for e_idx in range(item_count):
                             e_row = event_rows.nth(e_idx)
                             min_loc = e_row.locator(".td-event-home-minute, .td-event-away-minute").first
                             if min_loc.count() > 0:
@@ -129,6 +159,7 @@ def get_match_results(page, scrape_future_fixtures=False):
 
                         # Stats
                         stat_rows = page.locator("#table-match-statistics > tbody > tr")
+                        print(f"      - Estadísticas encontradas: {stat_rows.count()}")
                         for s_idx in range(stat_rows.count()):
                             s_row = stat_rows.nth(s_idx)
                             if s_row.locator(".td-match-stat-title").count() > 0:
@@ -139,24 +170,32 @@ def get_match_results(page, scrape_future_fixtures=False):
                                 }
                         
                         # Score
-                        score_text = page.locator(".modal-content .match-score").inner_text().strip()
-                        if "-" in score_text:
-                            p = score_text.split("-")
-                            home_goals = safe_int(p[0])
-                            away_goals = safe_int(p[1])
+                        score_text_el = page.locator(".modal-content .match-score")
+                        if score_text_el.count() > 0:
+                            score_text = score_text_el.inner_text().strip()
+                            if "-" in score_text:
+                                p = score_text.split("-")
+                                home_goals = safe_int(p[0])
+                                away_goals = safe_int(p[1])
 
-                        # Close modal
-                        close_btn = page.locator(".close-button-container button.close")
-                        if close_btn.is_visible(): close_btn.click()
-                        else: page.keyboard.press("Escape")
+                        # Close modal - Robust way
+                        close_btn = page.locator(".close-button-container button.close, .modal.in button.close, [data-dismiss='modal']")
+                        if close_btn.count() > 0 and close_btn.first.is_visible():
+                            close_btn.first.click()
+                        else: 
+                            page.keyboard.press("Escape")
+                        
                         page.wait_for_selector(".modal-content", state="hidden", timeout=3000)
 
-                    except:
-                        # If modal fails, just ignore detailed stats
+                    except Exception as inner_e:
+                        print(f"      ⚠️ Error procesando contenido del modal: {inner_e}")
+                        # Force close if failed inside
                         page.keyboard.press("Escape")
 
                 except Exception as e:
-                    print(f"    ⚠️ Error detail grab: {e}")
+                    print(f"    ⚠️ Error detail grab ({home_team} vs {away_team}): {e}")
+                    # Ensure modal is gone
+                    page.keyboard.press("Escape")
             else:
                 # FUTURE MATCH
                 # We already have referee, teams, managers.
