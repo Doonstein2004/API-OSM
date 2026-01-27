@@ -436,6 +436,7 @@ def sync_matches(conn, matches_data, processed_leagues, user_id):
                     ) VALUES %s
                     ON CONFLICT (league_id, round, home_team, away_team) 
                     DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
                         home_manager = EXCLUDED.home_manager, away_manager = EXCLUDED.away_manager,
                         home_goals = EXCLUDED.home_goals, away_goals = EXCLUDED.away_goals,
                         events = EXCLUDED.events, statistics = EXCLUDED.statistics, ratings = EXCLUDED.ratings,
@@ -544,7 +545,7 @@ def sync_tactics(conn, tactics_data, processed_leagues, user_id, current_round_m
             )
             
             sql = """
-                INSERT INTO public.match_tactics (
+                    INSERT INTO public.match_tactics (
                     user_id, league_id, round, team_name,
                     game_plan, tackling, pressure, mentality, tempo,
                     forwards_tactic, midfielders_tactic, defenders_tactic,
@@ -552,6 +553,7 @@ def sync_tactics(conn, tactics_data, processed_leagues, user_id, current_round_m
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 ON CONFLICT (league_id, round, team_name)
                 DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
                     game_plan = EXCLUDED.game_plan,
                     tackling = EXCLUDED.tackling,
                     pressure = EXCLUDED.pressure,
@@ -852,7 +854,7 @@ def run_update_for_user(user_id):
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
             is_gha = os.getenv("GITHUB_ACTIONS") == "true"
-            browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True if is_gha else True, args=["--no-sandbox"])
             context = browser.new_context(viewport={'width': 1280, 'height': 720})
             page = context.new_page()
             

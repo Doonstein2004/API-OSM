@@ -10,10 +10,9 @@ load_dotenv()
 
 def get_match_results(page, scrape_future_fixtures=False):
     """
-    Extrae los resultados. V4.0 Robusta (Híbrida: Iteración JS + Extracción Selectores).
-    Combina la velocidad de iteración de la V3 con la fiabilidad de extracción de la V1.
+    Extrae los resultados. V4.1 FIXED - Corregida extracción de eventos, stats y ratings.
     """
-    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V4.0 (ROBUST HYBRID) ---")
+    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V4.1 (FIXED) ---")
     
     try:
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
@@ -23,14 +22,23 @@ def get_match_results(page, scrape_future_fixtures=False):
         NUM_SLOTS = 4
 
         # Función auxiliar para convertir iconos a tipos de evento
+        # Función auxiliar para convertir iconos a tipos de evento
         def resolve_event_type(html_content):
             html = html_content.lower()
-            if "icon-matchevent-goal" in html or "icon-matchevent-penaltygoal" in html or "goal" in html: return "goal"
-            if "icon-player-yellowcard" in html or "yellowcard" in html: return "yellow_card"
-            if "icon-player-redcard" in html or "redcard" in html: return "red_card"
-            if "icon-player-injury" in html or "injury" in html: return "injury"
-            if "icon-matchevent-sub" in html or "substitution" in html: return "substitution"
-            if "icon-matchevent-penaltymiss" in html or "penaltymiss" in html: return "penalty_miss"
+            
+            # Prioridad a eventos específicos (Tarjetas, Lesiones, Cambios, Penales fallados)
+            if "yellowcard" in html or "icon-player-yellowcard" in html: return "yellow_card"
+            if "redcard" in html or "icon-player-redcard" in html: return "red_card"
+            if "injury" in html or "icon-player-injury" in html: return "injury"
+            if "substitution" in html or "icon-matchevent-sub" in html: return "substitution"
+            if "penaltymiss" in html or "icon-matchevent-penaltymiss" in html: return "penalty_miss"
+            
+            # Goles (Al final para evitar falsos positivos con substrings)
+            if "icon-matchevent-goal" in html or "icon-matchevent-penaltygoal" in html or "own-goal" in html: return "goal"
+            
+            # Fallback seguro para gol solo si no es ninguno de los anteriores
+            if "goal" in html and "kick" not in html: return "goal"
+            
             return "other"
 
         # --- LOOP PRINCIPAL ---
@@ -81,7 +89,6 @@ def get_match_results(page, scrape_future_fixtures=False):
                 print(f"  - Jornada detectada: {round_number}")
 
                 # --- EXTRACT ROWS VIA JS (Solo para saber cuántas son y su estado básico) ---
-                # Esto es más rápido que iterar locators uno por uno solo para ver si se jugaron
                 match_rows_data = page.evaluate("""() => {
                     const rows = Array.from(document.querySelectorAll("table.table-sticky tbody tr"));
                     return rows.map((r, i) => {
@@ -151,8 +158,7 @@ def get_match_results(page, scrape_future_fixtures=False):
                     if m_info['is_played']:
                         print(f"    🔍 Detalles para {m_info['home_team']} vs {m_info['away_team']}...")
                         
-                        # --- CLICK (Usando Locator Estándar) ---
-                        # Usamos .nth() sobre el selector original de la tabla para asegurar consistencia
+                        # --- CLICK ---
                         row_locator = page.locator("table.table-sticky tbody tr").nth(m_info['idx'])
                         
                         try:
@@ -167,12 +173,9 @@ def get_match_results(page, scrape_future_fixtures=False):
                                 page.wait_for_selector(".modal-content", state="visible", timeout=3000)
 
                             # Pequeña espera de estabilización
-                            time.sleep(0.3)
+                            time.sleep(0.5)
 
-                            # --- EXTRACCIÓN DE DETALLES (ESTRATEGIA SELECTORES) ---
-                            # Usamos evaluate para extraer todo el DOM del modal de una sola vez
-                            # Esto es mucho más rápido que hacer 50 llamadas a locator().inner_text()
-                            
+                            # --- EXTRACCIÓN DE DETALLES MEJORADA ---
                             details_data = page.evaluate("""() => {
                                 const modal = document.querySelector('.modal-content');
                                 if (!modal) return null;
@@ -185,51 +188,63 @@ def get_match_results(page, scrape_future_fixtures=False):
                                     const spanName = refDiv.querySelector('span[data-bind*="text: name"]');
                                     if(spanName) refName = spanName.innerText.trim();
                                     
-                                    // Strictness por clase de icono
+                                    // Strictness por clase de icono - Devuelve Texto en lugar de número
                                     const icon = refDiv.querySelector('span.icon-referee');
                                     if(icon) {
-                                        if(icon.classList.contains('very-lenient')) strictness = 'Very Lenient';
+                                        if(icon.classList.contains('verylenient')) strictness = 'Very Lenient';
                                         else if(icon.classList.contains('lenient')) strictness = 'Lenient';
                                         else if(icon.classList.contains('average')) strictness = 'Average';
                                         else if(icon.classList.contains('strict')) strictness = 'Strict';
-                                        else if(icon.classList.contains('very-strict')) strictness = 'Very Strict';
+                                        else if(icon.classList.contains('verystrict')) strictness = 'Very Strict';
                                     }
                                 }
 
-                                // --- EVENTS ---
+                                // --- EVENTS --- (Ya actualizado anteriormente)
                                 const events = [];
                                 const rows = Array.from(modal.querySelectorAll('table.table-match-events tbody tr'));
                                 rows.forEach(r => {
-                                    const minEl = r.querySelector('.td-event-home-minute span, .td-event-away-minute span');
+                                    const minHomeEl = r.querySelector('.td-event-home-minute span');
+                                    const minAwayEl = r.querySelector('.td-event-away-minute span');
+                                    const minEl = minHomeEl || minAwayEl;
                                     if(!minEl) return;
                                     
                                     const minute = parseInt(minEl.innerText.trim()) || 0;
                                     
-                                    // Detectar lado
                                     const homeNameDiv = r.querySelector('.td-event-home-names > div');
-                                    const side = homeNameDiv ? 'home' : 'away';
+                                    const side = (homeNameDiv && homeNameDiv.children.length > 0) ? 'home' : 'away';
                                     
-                                    // Iconos HTML
-                                    const hIcon = r.querySelector('.td-event-home-icon').innerHTML;
-                                    const aIcon = r.querySelector('.td-event-away-icon').innerHTML;
-                                    const rawHtml = (hIcon + aIcon).toLowerCase();
+                                    let eventType = "other";
+                                    const iconSpan = r.querySelector('.td-event-home-icon span, .td-event-away-icon span');
                                     
-                                    // Nombre Jugador
+                                    if (iconSpan) {
+                                        const cls = iconSpan.className.toLowerCase();
+                                        if (cls.includes('yellowcard')) eventType = 'yellow_card';
+                                        else if (cls.includes('redcard')) eventType = 'red_card';
+                                        else if (cls.includes('injury')) eventType = 'injury';
+                                        else if (cls.includes('sub')) eventType = 'substitution';
+                                        else if (cls.includes('penaltymiss')) eventType = 'penalty_miss';
+                                        else if (cls.includes('goal')) eventType = 'goal';
+                                    }
+                                    
                                     let player = "";
-                                    const boldInfo = r.querySelector('.semi-bold');
-                                    if(boldInfo) player = boldInfo.innerText.trim();
-                                    
-                                    // Detalle extra (si no es jugador)
                                     let detail = "";
-                                    if(!player) {
-                                        const detDiv = r.querySelector(`.td-event-${side}-names div div:not(.semi-bold)`);
-                                        if(detDiv) detail = detDiv.innerText.trim();
+                                    const namesCell = r.querySelector(`.td-event-${side}-names`);
+                                    if(namesCell) {
+                                        const boldEl = namesCell.querySelector('.semi-bold');
+                                        if(boldEl) player = boldEl.innerText.trim();
+                                        
+                                        const allDivs = namesCell.querySelectorAll('div');
+                                        allDivs.forEach(d => {
+                                            if(!d.classList.contains('semi-bold') && d.innerText.trim()) {
+                                                detail = d.innerText.trim();
+                                            }
+                                        });
                                     }
 
                                     events.push({
                                         minute: minute,
                                         side: side,
-                                        raw_html: rawHtml,
+                                        type: eventType,
                                         player: player,
                                         detail: detail
                                     });
@@ -241,35 +256,69 @@ def get_match_results(page, scrape_future_fixtures=False):
                                 statRows.forEach(r => {
                                     const titleEl = r.querySelector('.td-match-stat-title');
                                     if(titleEl) {
-                                        const key = titleEl.innerText.trim();
-                                        const hVal = r.querySelector('.td-match-stat-home') ? r.querySelector('.td-match-stat-home').innerText.trim() : "0";
-                                        const aVal = r.querySelector('.td-match-stat-away') ? r.querySelector('.td-match-stat-away').innerText.trim() : "0";
+                                        // Usamos TitleCase o snake_case según preferencia? 
+                                        // El usuario mostró "Cards" (TitleCase) en el JSON "Correcto". Ajustamos.
+                                        let key = titleEl.innerText.trim(); 
+                                        // key = key.toLowerCase().replace(/\s+/g, '_'); // Anterior
+                                        
+                                        const hEl = r.querySelector('.td-match-stat-home');
+                                        const aEl = r.querySelector('.td-match-stat-away');
+                                        
+                                        let hVal = hEl ? hEl.innerText.trim() : "0";
+                                        let aVal = aEl ? aEl.innerText.trim() : "0";
+                                        
+                                        hVal = hVal.replace('%', '').replace(/[^\d]/g, '');
+                                        aVal = aVal.replace('%', '').replace(/[^\d]/g, '');
+                                        
+                                        if(key === 'Cards') {
+                                            const hYellow = hEl.querySelector('.icon-player-yellowcard');
+                                            const hRed = hEl.querySelector('.icon-player-redcard');
+                                            const aYellow = aEl.querySelector('.icon-player-yellowcard');
+                                            const aRed = aEl.querySelector('.icon-player-redcard');
+                                            
+                                            // Formato "Yellow Red" string para coincidir con "2 0" del JSON correcto?
+                                            // En el JSON correcto: "Cards": { "away": "0 1", "home": "2 0" } -> Parece "Yellow Red"
+                                            const hY = hYellow ? (parseInt(hYellow.innerText.trim()) || 0) : 0;
+                                            const hR = hRed ? (parseInt(hRed.innerText.trim()) || 0) : 0;
+                                            const aY = aYellow ? (parseInt(aYellow.innerText.trim()) || 0) : 0;
+                                            const aR = aRed ? (parseInt(aRed.innerText.trim()) || 0) : 0;
+                                            
+                                            // Sobrescribimos para devolver strings "Y R" si queremos match exacto
+                                            hVal = `${hY} ${hR}`;
+                                            aVal = `${aY} ${aR}`;
+                                            
+                                            // OJO: El código anterior devolvía objeto {white:.., red:..}.
+                                            // El JSON correcto muestra "Cards": {"away": "0 1", "home": "2 0"}
+                                            // El JSON incorrecto muestra "cards": {"away": {red:0, yellow:2}...}
+                                            // Si el Front usa el JSON Correcto, debo cambiar esto.
+                                            // Cambiamos a objeto simple string style "Y R"
+                                        }
+                                        
                                         stats[key] = { home: hVal, away: aVal };
                                     }
                                 });
 
                                 // --- RATINGS ---
                                 const ratings = { home: [], away: [] };
-                                const extractR = (selector, list) => {
-                                    const t = modal.querySelector(selector);
-                                    if(!t) return;
-                                    t.querySelectorAll('tr').forEach(tr => {
+                                
+                                const extractRatings = (table, targetArray) => {
+                                    if(!table) return;
+                                    const rows = table.querySelectorAll('tbody tr');
+                                    rows.forEach(tr => {
                                         const nameEl = tr.querySelector('.td-playergrade-name .semi-bold');
                                         const gradeEl = tr.querySelector('.playergrade span');
                                         if(nameEl && gradeEl) {
-                                            list.push({
-                                                player: nameEl.innerText.trim(),
-                                                grade: gradeEl.innerText.trim()
+                                            const gradeText = gradeEl.innerText.trim();
+                                            targetArray.push({
+                                                player: nameEl.innerText.trim(), // CAMBIO: 'name' -> 'player'
+                                                grade: gradeText === '-' ? "0" : gradeText // CAMBIO: String grade
                                             });
                                         }
                                     });
                                 };
-                                extractR('table.table-match-events + table .table-playergrades-home table', ratings.home); // A veces el selector es complejo
-                                // Fallback selector más simple
-                                if(ratings.home.length === 0) extractR('.table-playergrades-home table', ratings.home);
-                                if(ratings.home.length === 0) extractR('#table-playergrades .table-playergrades-home table', ratings.home);
-                                
-                                extractR('#table-playergrades .table-playergrades-away table', ratings.away);
+
+                                extractRatings(modal.querySelector('.table-playergrades-home table'), ratings.home);
+                                extractRatings(modal.querySelector('.table-playergrades-away table'), ratings.away);
 
                                 return {
                                     referee: refName,
@@ -288,15 +337,16 @@ def get_match_results(page, scrape_future_fixtures=False):
                                 
                                 # Procesar eventos en Python
                                 for raw_ev in details_data['events']:
-                                    ev_type = resolve_event_type(raw_ev['raw_html'])
                                     match_obj['events'].append({
                                         "minute": raw_ev['minute'],
-                                        "type": ev_type,
+                                        "type": raw_ev['type'],
                                         "side": raw_ev['side'],
-                                        "player": raw_ev['player'] or raw_ev['detail'] # Fallback
+                                        "player": raw_ev['player'] or raw_ev['detail'], # Fallback
+                                        "detail": raw_ev['detail']
                                     })
                                 
-                                print(f"      ✓ Eventos: {len(match_obj['events'])}, Ref: {match_obj['referee']}")
+                                print(f"      ✓ Eventos: {len(match_obj['events'])}, Stats: {len(match_obj['statistics'])}, Ref: {match_obj['referee']}")
+                                print(f"      ✓ Ratings - Home: {len(match_obj['ratings']['home'])}, Away: {len(match_obj['ratings']['away'])}")
                             else:
                                 print("      ⚠️ No se pudieron extraer datos del DOM del modal.")
 
@@ -304,22 +354,21 @@ def get_match_results(page, scrape_future_fixtures=False):
                             print(f"      ⚠️ Error procesando modal: {e}")
 
                         # --- CERRAR MODAL (Hardcore Mode) ---
-                        # 1. Intentar click
                         try:
-                            # La X de cierre
+                            # Intentar click en botón de cierre
                             close_btn = page.locator("button.close, [data-dismiss='modal']").first
-                            if close_btn.is_visible():
+                            if close_btn.is_visible(timeout=500):
                                 close_btn.click(timeout=1000)
                             else:
                                 page.keyboard.press("Escape")
                         except:
                             page.keyboard.press("Escape")
                         
-                        # 2. Esperar a que se vaya
+                        # Esperar a que se vaya
                         try:
                             page.wait_for_selector(".modal-content", state="hidden", timeout=1500)
                         except:
-                            # 3. Si sigue ahí, JS Nuke
+                            # Si sigue ahí, JS Nuke
                             page.evaluate("""() => {
                                 const modals = document.querySelectorAll('.modal, .modal-backdrop');
                                 modals.forEach(el => el.remove());
