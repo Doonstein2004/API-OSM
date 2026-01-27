@@ -10,9 +10,10 @@ load_dotenv()
 
 def get_match_results(page, scrape_future_fixtures=False):
     """
-    Extrae los resultados. V2.1 Debug Mode.
+    Extrae los resultados. V4.0 Robusta (Híbrida: Iteración JS + Extracción Selectores).
+    Combina la velocidad de iteración de la V3 con la fiabilidad de extracción de la V1.
     """
-    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V2.1 (DEBUG) ---")
+    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V4.0 (ROBUST HYBRID) ---")
     
     try:
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
@@ -21,226 +22,16 @@ def get_match_results(page, scrape_future_fixtures=False):
         all_leagues_matches = []
         NUM_SLOTS = 4
 
-        # Función auxiliar
-        def scrape_current_round(page, round_element_idx=None):
-            matches_list = []
-            
-            # Detectar Jornada
-            try:
-                header_span = page.locator("th.text-center span[data-bind*='weekNr']")
-                if header_span.count() > 0:
-                    round_number = safe_int(header_span.inner_text())
-                else:
-                    round_number = 0
-            except:
-                round_number = 0
-            
-            # Contar filas
-            rows = page.locator("table.table-sticky tbody tr")
-            row_count = rows.count()
-            print(f"  - Encontrados {row_count} filas (Jornada {round_number}).")
-
-            for j in range(row_count):
-                row = rows.nth(j)
-                
-                # Verificar si es una fila de partido válida
-                if row.locator("td.td-home").count() == 0: continue
-
-                row.scroll_into_view_if_needed()
-                
-                # --- DATOS BÁSICOS ---
-                home_team = row.locator("td.td-home .font-sm").inner_text().strip()
-                away_team = row.locator("td.td-away .font-sm").inner_text().strip()
-                
-                # Mánagers
-                h_mgr_loc = row.locator("td.td-home .text-secondary")
-                home_manager = h_mgr_loc.first.inner_text().strip() if h_mgr_loc.count() > 0 else "CPU"
-                
-                a_mgr_loc = row.locator("td.td-away .text-secondary")
-                away_manager = a_mgr_loc.first.inner_text().strip() if a_mgr_loc.count() > 0 else "CPU"
-
-                # Detección de partido jugado
-                is_played = False
-                home_goals = 0
-                away_goals = 0
-                score_text = ""
-                
-                # --- DEBUG ROW CONTENT ---
-                # row_text = row.inner_text()
-                # print(f"    [ROW RAW] {row_text.replace(chr(10), ' | ')}")
-
-                try:
-                    # Intento 1: Clase estándar
-                    score_el = row.locator("td.td-score")
-                    
-                    # Intento 2: Clase alternativa (a veces cambia)
-                    if score_el.count() == 0:
-                        score_el = row.locator("td.match-score")
-                    
-                    # Intento 3: Por posición (normalmente es la 3ra td: Home, Score/Time, Away)
-                    # Ojo: nth-child es 1-based. Home=1, Score=2 (si no hay round visual) o 3.
-                    if score_el.count() == 0:
-                        # Buscamos cualquier TD que tenga un guion o dos puntos
-                        tds = row.locator("td")
-                        for k in range(tds.count()):
-                            txt = tds.nth(k).inner_text().strip()
-                            if ("-" in txt or ":" in txt) and len(txt) < 10: # Score or Time
-                                score_el = tds.nth(k)
-                                break
-                    
-                    if score_el.count() > 0:
-                        score_text = score_el.first.inner_text().strip()
-                        print(f"    [DEBUG] Fila {j}: {home_team} vs {away_team} | ScoreDetected='{score_text}'")
-                        
-                        # Cualquier cosa que parezca numérico + separador + numérico
-                        nums = re.findall(r'\d+', score_text)
-                        
-                        if len(nums) >= 2 and ":" not in score_text:
-                            is_played = True
-                            home_goals = int(nums[0])
-                            away_goals = int(nums[1])
-                        elif "-" in score_text and ":" not in score_text:
-                             is_played = True
-                             parts = score_text.split("-")
-                             if len(parts) == 2:
-                                home_goals = safe_int(parts[0])
-                                away_goals = safe_int(parts[1])
-                    else:
-                        print(f"    ⚠️ [DEBUG] No se encontró celda de score para {home_team} vs {away_team}")
-
-                except Exception as e:
-                    print(f"    ⚠️ Error leyendo score: {e}")
-
-                # Referee
-                referee_name = ""
-                try:
-                    ref_loc = row.locator("td.td-round .referee-name")
-                    if ref_loc.count() > 0:
-                        referee_name = ref_loc.inner_text().strip()
-                except: pass
-
-                events = []
-                stats = {}
-                ratings = {"home": [], "away": []}
-
-                # --- EXTRAER DETALLES ---
-                if is_played:
-                    try:
-                        print(f"    🔍 Extrayendo detalles para {home_team} vs {away_team}...")
-                        handle_popups(page)
-                        
-                        # INTENTO DE CLICK MEJORADO
-                        # 1. Clicar específicamente en el score, suele ser más efectivo
-                        target_click = row.locator("td.td-score, td.match-score").first
-                        if target_click.count() == 0: target_click = row # Fallback a fila completa
-                        
-                        try:
-                            target_click.click(timeout=1000) # Clic normal primero (dispara eventos JS mejor)
-                        except:
-                            target_click.click(force=True) # Fallback force
-                        
-                        # Esperar carga del modal
-                        try:
-                            # Esperar selector específico de contenido para confirmar carga
-                            page.wait_for_selector(".modal-content table.table-match-events", state="visible", timeout=4000)
-                        except:
-                            # Si falla, verificar si abrió al menos el contenedor del modal
-                            if page.locator(".modal-content").is_visible():
-                                pass # Abrió pero quizas no hay eventos (0-0 sin tarjetas)
-                            else:
-                                # Reintentar click si no abrió nada
-                                print("      ⚠️ Modal no abrió. Reintentando click...")
-                                target_click.click(force=True)
-                                page.wait_for_selector(".modal-content", state="visible", timeout=3000)
-                            
-                        # --- EVENTOS (Lógica Iconos Clasica) ---
-                        event_rows = page.locator(".modal-content table.table-match-events tbody tr")
-                        item_count = event_rows.count()
-                        print(f"      - Eventos encontrados: {item_count}")
-
-                        for e_idx in range(item_count):
-                            e_row = event_rows.nth(e_idx)
-                            
-                            min_loc = e_row.locator(".td-event-home-minute, .td-event-away-minute").first
-                            if min_loc.count() == 0: continue
-                            minute = safe_int(min_loc.inner_text())
-
-                            h_icon = e_row.locator(".td-event-home-icon").inner_html() if e_row.locator(".td-event-home-icon").count() > 0 else ""
-                            a_icon = e_row.locator(".td-event-away-icon").inner_html() if e_row.locator(".td-event-away-icon").count() > 0 else ""
-                            full_icon = (h_icon + a_icon).lower()
-
-                            event_type = "other"
-                            # Mapeo exhaustivo
-                            if "goal" in full_icon: event_type = "goal"
-                            elif "card-yellow" in full_icon or "yellowcard" in full_icon: event_type = "yellow_card"
-                            elif "card-red" in full_icon or "redcard" in full_icon: event_type = "red_card"
-                            elif "injury" in full_icon: event_type = "injury"
-                            elif "substitution" in full_icon or "sub" in full_icon: event_type = "substitution"
-                            elif "missed" in full_icon or "penalty" in full_icon: event_type = "missed_penalty"
-
-                            team_side = "home" if e_row.locator("td.td-event-home-names div").count() > 0 else "away"
-
-                            player_name = ""
-                            if e_row.locator(".semi-bold").count() > 0:
-                                player_name = e_row.locator(".semi-bold").first.inner_text().strip()
-                            else:
-                                detail_loc = e_row.locator(f"td.td-event-{team_side}-names div div:not(.semi-bold)")
-                                if detail_loc.count() > 0:
-                                    player_name = detail_loc.first.inner_text().strip()
-
-                            events.append({
-                                "minute": minute,
-                                "type": event_type,
-                                "side": team_side,
-                                "player": player_name
-                            })
-
-                        # --- ESTADÍSTICAS ---
-                        stat_rows = page.locator("#table-match-statistics > tbody > tr")
-                        for s_idx in range(stat_rows.count()):
-                            s_row = stat_rows.nth(s_idx)
-                            if s_row.locator(".td-match-stat-title").count() > 0:
-                                title = s_row.locator(".td-match-stat-title").inner_text().strip()
-                                stats[title] = {
-                                    "home": s_row.locator(".td-match-stat-home").inner_text().strip(),
-                                    "away": s_row.locator(".td-match-stat-away").inner_text().strip()
-                                }
-                        
-                        # --- CERRAR MODAL ---
-                        closed = False
-                        close_btn = page.locator(".close-button-container button.close, .modal.in button.close, [data-dismiss='modal']")
-                        if close_btn.count() > 0 and close_btn.first.is_visible():
-                            close_btn.first.click(timeout=1000, force=True)
-                            closed = True
-                        
-                        if not closed: page.keyboard.press("Escape")
-                        
-                        try:
-                            page.wait_for_selector(".modal-content", state="hidden", timeout=2000)
-                        except:
-                            page.keyboard.press("Escape")
-
-                    except Exception as e:
-                        print(f"    ⚠️ Error detalles: {e}")
-                        page.keyboard.press("Escape")
-
-                matches_list.append({
-                    "round": round_number,
-                    "home_team": home_team,
-                    "home_manager": home_manager,
-                    "away_team": away_team,
-                    "away_manager": away_manager,
-                    "home_goals": home_goals,
-                    "away_goals": away_goals,
-                    "is_played": is_played,
-                    "referee": referee_name,
-                    "referee_strictness": "Unknown",
-                    "events": events,
-                    "statistics": stats,
-                    "ratings": ratings
-                })
-
-            return matches_list
+        # Función auxiliar para convertir iconos a tipos de evento
+        def resolve_event_type(html_content):
+            html = html_content.lower()
+            if "icon-matchevent-goal" in html or "icon-matchevent-penaltygoal" in html or "goal" in html: return "goal"
+            if "icon-player-yellowcard" in html or "yellowcard" in html: return "yellow_card"
+            if "icon-player-redcard" in html or "redcard" in html: return "red_card"
+            if "icon-player-injury" in html or "injury" in html: return "injury"
+            if "icon-matchevent-sub" in html or "substitution" in html: return "substitution"
+            if "icon-matchevent-penaltymiss" in html or "penaltymiss" in html: return "penalty_miss"
+            return "other"
 
         # --- LOOP PRINCIPAL ---
         for i in range(NUM_SLOTS):
@@ -248,7 +39,12 @@ def get_match_results(page, scrape_future_fixtures=False):
             
             if page.url != MAIN_DASHBOARD_URL:
                 page.goto(MAIN_DASHBOARD_URL)
-            page.wait_for_selector(".career-teamslot", timeout=35000)
+            try:
+                page.wait_for_selector(".career-teamslot", timeout=20000)
+            except: 
+                print("  ⚠️ Timeout en dashboard. Saltando.")
+                continue
+                
             handle_popups(page)
 
             slot = page.locator(".career-teamslot").nth(i)
@@ -261,7 +57,12 @@ def get_match_results(page, scrape_future_fixtures=False):
             print(f"Procesando equipo: {team_name} en la liga {league_name}")
 
             slot.click()
-            page.wait_for_selector("#timers", timeout=45000)
+            try:
+                page.wait_for_selector("#timers", timeout=45000)
+            except:
+                print("  ⚠️ Timeout cargando equipo. Siguiente.")
+                continue
+                
             handle_popups(page)
             
             try:
@@ -270,24 +71,268 @@ def get_match_results(page, scrape_future_fixtures=False):
                     print("  ❌ No se pudo cargar la tabla de resultados. Saltando.")
                     continue
                 
-                league_matches = []
-                # Siempre scrapeamos la actual (que debería ser el último resultado)
-                round_data = scrape_current_round(page)
-                league_matches.extend(round_data)
+                # --- JORNADA ---
+                round_number = 0
+                try:
+                    header_span = page.locator("th.text-center span[data-bind*='weekNr']")
+                    if header_span.count() > 0:
+                        round_number = safe_int(header_span.inner_text())
+                except: pass
+                print(f"  - Jornada detectada: {round_number}")
 
-                # Deduplicate
-                unique_lm = []
-                seen_local = set()
-                for m in league_matches:
-                    k = (m['round'], m['home_team'], m['away_team'])
-                    if k not in seen_local:
-                        seen_local.add(k)
-                        unique_lm.append(m)
+                # --- EXTRACT ROWS VIA JS (Solo para saber cuántas son y su estado básico) ---
+                # Esto es más rápido que iterar locators uno por uno solo para ver si se jugaron
+                match_rows_data = page.evaluate("""() => {
+                    const rows = Array.from(document.querySelectorAll("table.table-sticky tbody tr"));
+                    return rows.map((r, i) => {
+                        const isClickable = r.classList.contains('clickable') || r.getAttribute('onclick');
+                        const home = r.querySelector('.td-home .font-sm');
+                        const away = r.querySelector('.td-away .font-sm');
+                        const scoreEl = r.querySelector('.match-score span') || r.querySelector('span[data-bind*="score"]');
+                        
+                        let isPlayed = false;
+                        let hGoals = 0, aGoals = 0;
+                        
+                        if (scoreEl) {
+                            const txt = scoreEl.innerText.trim();
+                            if(txt.includes('-') && !txt.includes(':')) {
+                                const parts = txt.split('-');
+                                if(parts.length === 2) {
+                                    isPlayed = true;
+                                    hGoals = parseInt(parts[0]);
+                                    aGoals = parseInt(parts[1]);
+                                }
+                            }
+                        }
+
+                        // Managers
+                        const hMgrEl = r.querySelector('.td-home .text-secondary');
+                        const aMgrEl = r.querySelector('.td-away .text-secondary');
+
+                        return {
+                            idx: i,
+                            is_played: isPlayed,
+                            home_team: home ? home.innerText.trim() : "Unknown",
+                            away_team: away ? away.innerText.trim() : "Unknown",
+                            home_manager: hMgrEl ? hMgrEl.innerText.trim() : "CPU",
+                            away_manager: aMgrEl ? aMgrEl.innerText.trim() : "CPU",
+                            home_goals: hGoals,
+                            away_goals: aGoals
+                        };
+                    });
+                }""")
                 
-                print(f"  - Total escaneado (unicos): {len(unique_lm)} partidos.")
+                print(f"  - Encontrados {len(match_rows_data)} partidos en lista.")
+                
+                league_matches = []
+
+                for m_idx, m_info in enumerate(match_rows_data):
+                    # Filtrar futuros si no se piden
+                    if not scrape_future_fixtures and not m_info['is_played']:
+                        continue
+
+                    # Objeto base
+                    match_obj = {
+                        "round": round_number,
+                        "home_team": m_info['home_team'],
+                        "home_manager": m_info['home_manager'],
+                        "away_team": m_info['away_team'],
+                        "away_manager": m_info['away_manager'],
+                        "home_goals": m_info['home_goals'],
+                        "away_goals": m_info['away_goals'],
+                        "is_played": m_info['is_played'],
+                        "referee": "",
+                        "referee_strictness": "",
+                        "events": [],
+                        "statistics": {},
+                        "ratings": {"home": [], "away": []}
+                    }
+
+                    if m_info['is_played']:
+                        print(f"    🔍 Detalles para {m_info['home_team']} vs {m_info['away_team']}...")
+                        
+                        # --- CLICK (Usando Locator Estándar) ---
+                        # Usamos .nth() sobre el selector original de la tabla para asegurar consistencia
+                        row_locator = page.locator("table.table-sticky tbody tr").nth(m_info['idx'])
+                        
+                        try:
+                            # Click con retry
+                            row_locator.click(position={"x": 5, "y": 5}, force=True)
+                            
+                            # Esperar modal
+                            try:
+                                page.wait_for_selector(".modal-content table.table-match-events", state="visible", timeout=3500)
+                            except:
+                                # A veces no hay eventos (0-0), esperamos al menos el contenedor o stats
+                                page.wait_for_selector(".modal-content", state="visible", timeout=3000)
+
+                            # Pequeña espera de estabilización
+                            time.sleep(0.3)
+
+                            # --- EXTRACCIÓN DE DETALLES (ESTRATEGIA SELECTORES) ---
+                            # Usamos evaluate para extraer todo el DOM del modal de una sola vez
+                            # Esto es mucho más rápido que hacer 50 llamadas a locator().inner_text()
+                            
+                            details_data = page.evaluate("""() => {
+                                const modal = document.querySelector('.modal-content');
+                                if (!modal) return null;
+
+                                // --- REFEREE ---
+                                let refName = "";
+                                let strictness = "Unknown";
+                                const refDiv = modal.querySelector('#match-details-referee');
+                                if (refDiv) {
+                                    const spanName = refDiv.querySelector('span[data-bind*="text: name"]');
+                                    if(spanName) refName = spanName.innerText.trim();
+                                    
+                                    // Strictness por clase de icono
+                                    const icon = refDiv.querySelector('span.icon-referee');
+                                    if(icon) {
+                                        if(icon.classList.contains('very-lenient')) strictness = 'Very Lenient';
+                                        else if(icon.classList.contains('lenient')) strictness = 'Lenient';
+                                        else if(icon.classList.contains('average')) strictness = 'Average';
+                                        else if(icon.classList.contains('strict')) strictness = 'Strict';
+                                        else if(icon.classList.contains('very-strict')) strictness = 'Very Strict';
+                                    }
+                                }
+
+                                // --- EVENTS ---
+                                const events = [];
+                                const rows = Array.from(modal.querySelectorAll('table.table-match-events tbody tr'));
+                                rows.forEach(r => {
+                                    const minEl = r.querySelector('.td-event-home-minute span, .td-event-away-minute span');
+                                    if(!minEl) return;
+                                    
+                                    const minute = parseInt(minEl.innerText.trim()) || 0;
+                                    
+                                    // Detectar lado
+                                    const homeNameDiv = r.querySelector('.td-event-home-names > div');
+                                    const side = homeNameDiv ? 'home' : 'away';
+                                    
+                                    // Iconos HTML
+                                    const hIcon = r.querySelector('.td-event-home-icon').innerHTML;
+                                    const aIcon = r.querySelector('.td-event-away-icon').innerHTML;
+                                    const rawHtml = (hIcon + aIcon).toLowerCase();
+                                    
+                                    // Nombre Jugador
+                                    let player = "";
+                                    const boldInfo = r.querySelector('.semi-bold');
+                                    if(boldInfo) player = boldInfo.innerText.trim();
+                                    
+                                    // Detalle extra (si no es jugador)
+                                    let detail = "";
+                                    if(!player) {
+                                        const detDiv = r.querySelector(`.td-event-${side}-names div div:not(.semi-bold)`);
+                                        if(detDiv) detail = detDiv.innerText.trim();
+                                    }
+
+                                    events.push({
+                                        minute: minute,
+                                        side: side,
+                                        raw_html: rawHtml,
+                                        player: player,
+                                        detail: detail
+                                    });
+                                });
+
+                                // --- STATS ---
+                                const stats = {};
+                                const statRows = Array.from(modal.querySelectorAll('#table-match-statistics tbody tr'));
+                                statRows.forEach(r => {
+                                    const titleEl = r.querySelector('.td-match-stat-title');
+                                    if(titleEl) {
+                                        const key = titleEl.innerText.trim();
+                                        const hVal = r.querySelector('.td-match-stat-home') ? r.querySelector('.td-match-stat-home').innerText.trim() : "0";
+                                        const aVal = r.querySelector('.td-match-stat-away') ? r.querySelector('.td-match-stat-away').innerText.trim() : "0";
+                                        stats[key] = { home: hVal, away: aVal };
+                                    }
+                                });
+
+                                // --- RATINGS ---
+                                const ratings = { home: [], away: [] };
+                                const extractR = (selector, list) => {
+                                    const t = modal.querySelector(selector);
+                                    if(!t) return;
+                                    t.querySelectorAll('tr').forEach(tr => {
+                                        const nameEl = tr.querySelector('.td-playergrade-name .semi-bold');
+                                        const gradeEl = tr.querySelector('.playergrade span');
+                                        if(nameEl && gradeEl) {
+                                            list.push({
+                                                player: nameEl.innerText.trim(),
+                                                grade: gradeEl.innerText.trim()
+                                            });
+                                        }
+                                    });
+                                };
+                                extractR('table.table-match-events + table .table-playergrades-home table', ratings.home); // A veces el selector es complejo
+                                // Fallback selector más simple
+                                if(ratings.home.length === 0) extractR('.table-playergrades-home table', ratings.home);
+                                if(ratings.home.length === 0) extractR('#table-playergrades .table-playergrades-home table', ratings.home);
+                                
+                                extractR('#table-playergrades .table-playergrades-away table', ratings.away);
+
+                                return {
+                                    referee: refName,
+                                    strictness: strictness,
+                                    events: events,
+                                    stats: stats,
+                                    ratings: ratings
+                                };
+                            }""")
+
+                            if details_data:
+                                match_obj['referee'] = details_data['referee']
+                                match_obj['referee_strictness'] = details_data['strictness']
+                                match_obj['statistics'] = details_data['stats']
+                                match_obj['ratings'] = details_data['ratings']
+                                
+                                # Procesar eventos en Python
+                                for raw_ev in details_data['events']:
+                                    ev_type = resolve_event_type(raw_ev['raw_html'])
+                                    match_obj['events'].append({
+                                        "minute": raw_ev['minute'],
+                                        "type": ev_type,
+                                        "side": raw_ev['side'],
+                                        "player": raw_ev['player'] or raw_ev['detail'] # Fallback
+                                    })
+                                
+                                print(f"      ✓ Eventos: {len(match_obj['events'])}, Ref: {match_obj['referee']}")
+                            else:
+                                print("      ⚠️ No se pudieron extraer datos del DOM del modal.")
+
+                        except Exception as e:
+                            print(f"      ⚠️ Error procesando modal: {e}")
+
+                        # --- CERRAR MODAL (Hardcore Mode) ---
+                        # 1. Intentar click
+                        try:
+                            # La X de cierre
+                            close_btn = page.locator("button.close, [data-dismiss='modal']").first
+                            if close_btn.is_visible():
+                                close_btn.click(timeout=1000)
+                            else:
+                                page.keyboard.press("Escape")
+                        except:
+                            page.keyboard.press("Escape")
+                        
+                        # 2. Esperar a que se vaya
+                        try:
+                            page.wait_for_selector(".modal-content", state="hidden", timeout=1500)
+                        except:
+                            # 3. Si sigue ahí, JS Nuke
+                            page.evaluate("""() => {
+                                const modals = document.querySelectorAll('.modal, .modal-backdrop');
+                                modals.forEach(el => el.remove());
+                                document.body.classList.remove('modal-open');
+                                document.body.style.paddingRight = '';
+                            }""")
+                            time.sleep(0.2)
+
+                    league_matches.append(match_obj)
+
                 all_leagues_matches.append({
                     "league_name": league_name,
-                    "matches": unique_lm
+                    "matches": league_matches
                 })
 
             except Exception as e:
@@ -299,6 +344,3 @@ def get_match_results(page, scrape_future_fixtures=False):
     except Exception as e:
         print(f"❌ Error crítico en scraper: {e}")
         return []
-
-if __name__ == "__main__":
-    print("Este módulo está diseñado para ser importado.")

@@ -196,191 +196,169 @@ def get_next_match_info(page: Page):
 def extract_next_match_from_dashboard(page: Page) -> dict:
     """
     Extrae la información del próximo partido desde el dashboard del equipo.
-    Busca en .next-match-info-container para jornada y countdown.
-    Si no encuentra, hace click en #timers para revelar el dropdown.
-    
-    Returns:
-        dict: Información del próximo partido
+    V2.1: Incluye estrategia de RELOAD (F5) si se detecta bloqueo por modales.
     """
-    match_info = {
-        "matchday": 0,
-        "countdown_text": "",
-        "seconds_remaining": 0,
-        "timer_state": "unknown",
-        "referee_name": None,
-        "referee_strictness": None,
-        "is_cup_match": False
-    }
     
-    # Pequeña espera para que cargue todo el contenido dinámico
-    # El dashboard puede tardar en renderizar el next-match-info-container
-    time.sleep(1.5)
-    
-    # === CERRAR MODALES PRIMERO ===
-    handle_popups(page)
-    time.sleep(0.2)
-    handle_popups(page)  # Segunda pasada por si quedó alguno
-    
-    # === MÉTODO 1: Buscar en .next-match-info-container (Dashboard principal) ===
-    # Intentar esperar a que el contenedor principal aparezca, damos prioridad a esto
-    try:
-        page.wait_for_selector(".next-match-info-container .matchday-title", state="visible", timeout=4000)
-    except:
-        pass # Si no aparece, seguimos buscando con los otros métodos
-
-    try:
-        # Jornada: dentro de .next-match-info-container
-        matchday_selectors = [
-            ".next-match-info-container .matchday-title span.text-highlight",
-            ".next-match-info-container a.matchday-title span",
-            ".dashboard-header-vs .matchday-title span.text-highlight",
-            "a.matchday-title span.text-highlight",
-            ".matchday-title span.text-highlight"
-        ]
+    # Intentamos 2 veces: 
+    # Intento 0: Extracción normal
+    # Intento 1: Si falla, hacemos F5 y reintentamos (Estrategia Anti-Modal)
+    for attempt in range(2):
+        match_info = {
+            "matchday": 0,
+            "countdown_text": "",
+            "seconds_remaining": 0,
+            "timer_state": "unknown",
+            "referee_name": None,
+            "referee_strictness": None,
+            "is_cup_match": False
+        }
         
-        for selector in matchday_selectors:
-            try:
-                element = page.locator(selector)
-                if element.count() > 0 and element.first.is_visible(timeout=1000):
-                    matchday_text = element.first.inner_text()
-                    match = re.search(r'(\d+)', matchday_text)
-                    if match:
-                        match_info["matchday"] = int(match.group(1))
+        # Pequeña espera para renderizado
+        time.sleep(1.5)
+        
+        # === CERRAR MODALES ===
+        handle_popups(page)
+        time.sleep(0.2)
+        
+        # === MÉTODO 1: Buscar en .next-match-info-container (Dashboard principal) ===
+        try:
+            page.wait_for_selector(".next-match-info-container .matchday-title", state="visible", timeout=3000)
+        except:
+            pass 
+
+        try:
+            # Texto Jornada (Header)
+            matchday_selectors = [
+                ".next-match-info-container .matchday-title span.text-highlight",
+                ".next-match-info-container a.matchday-title span",
+                ".dashboard-header-vs .matchday-title span.text-highlight",
+                "a.matchday-title span.text-highlight",
+                ".matchday-title span.text-highlight"
+            ]
+            for selector in matchday_selectors:
+                if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible(timeout=500):
+                    txt = page.locator(selector).first.inner_text()
+                    m = re.search(r'(\d+)', txt)
+                    if m:
+                        match_info["matchday"] = int(m.group(1))
                         print(f"    ℹ️ Jornada {match_info['matchday']} obtenida del header")
                         break
-            except:
-                continue
-        
-        # Countdown: dentro de .next-match-info-container
-        countdown_selectors = [
-            ".next-match-info-container .next-match-timer",
-            ".dashboard-header-vs .next-match-timer",
-            ".next-match-timer"
-        ]
-        
-        for selector in countdown_selectors:
-            try:
-                element = page.locator(selector)
-                if element.count() > 0 and element.first.is_visible(timeout=1000):
-                    countdown_text = element.first.inner_text()
-                    seconds = parse_countdown(countdown_text)
-                    if seconds > 0:
-                        match_info["countdown_text"] = countdown_text
-                        match_info["seconds_remaining"] = seconds
+            
+            # Countdown (Header)
+            countdown_selectors = [
+                ".next-match-info-container .next-match-timer",
+                ".dashboard-header-vs .next-match-timer",
+                ".next-match-timer"
+            ]
+            for selector in countdown_selectors:
+                if page.locator(selector).count() > 0 and page.locator(selector).first.is_visible(timeout=500):
+                    txt = page.locator(selector).first.inner_text()
+                    secs = parse_countdown(txt)
+                    if secs > 0:
+                        match_info["countdown_text"] = txt
+                        match_info["seconds_remaining"] = secs
                         match_info["timer_state"] = "in_progress"
-                        print(f"    ℹ️ Countdown del header: {countdown_text}")
+                        print(f"    ℹ️ Countdown del header: {txt}")
                         break
-            except:
-                continue
-        
-        # Árbitro
-        referee_selectors = [
-            ".next-match-info-container .next-match-referee-name",
-            ".dashboard-header-vs .next-match-referee-name"
-        ]
-        for selector in referee_selectors:
-            try:
-                element = page.locator(selector)
-                if element.count() > 0 and element.first.is_visible(timeout=500):
-                    match_info["referee_name"] = element.first.inner_text()
+            
+            # Referee
+            ref_sel = [".next-match-info-container .next-match-referee-name", ".dashboard-header-vs .next-match-referee-name"]
+            for s in ref_sel:
+                if page.locator(s).count() > 0 and page.locator(s).first.is_visible(timeout=500):
+                    match_info["referee_name"] = page.locator(s).first.inner_text()
                     break
-            except:
-                continue
-        
-    except Exception as e:
-        print(f"    ⚠️ Error en Método 1: {e}")
-    
-    # === MÉTODO 2: Si no hay countdown, intentar con el dropdown #timers ===
-    if match_info["seconds_remaining"] == 0:
-        try:
-            # Hacer click en el botón de timers para revelar el dropdown
-            timers_button = page.locator("#timers")
-            if timers_button.count() > 0 and timers_button.first.is_visible(timeout=3000):
-                timers_button.first.click()
-                time.sleep(1)  # Esperar a que se abra el dropdown
-                
-                # Buscar el countdown en el dropdown .next-match-container
-                next_match_container = page.locator(".next-match-container span[data-bind*='secondsRemaining']")
-                if next_match_container.count() > 0:
-                    try:
-                        countdown_text = next_match_container.first.inner_text()
-                        match_info["countdown_text"] = countdown_text
-                        match_info["seconds_remaining"] = parse_countdown(countdown_text)
-                        match_info["timer_state"] = "in_progress"
-                        print(f"    ℹ️ Countdown obtenido del dropdown: {countdown_text}")
-                    except:
-                        pass
-                
-                # Buscar matchday en el dropdown
-                matchday_dropdown = page.locator(".next-match-container .matchday-title, .dropdown-menu .matchday-title")
-                if matchday_dropdown.count() > 0 and match_info["matchday"] == 0:
-                    try:
-                        md_text = matchday_dropdown.first.inner_text()
-                        md_match = re.search(r'(\d+)', md_text)
-                        if md_match:
-                            match_info["matchday"] = int(md_match.group(1))
-                    except:
-                        pass
-                
-                # Cerrar el dropdown
-                try:
-                    page.keyboard.press("Escape")
-                    time.sleep(0.3)
-                except:
-                    pass
-                    
+
         except Exception as e:
-            print(f"    ⚠️ Error con dropdown timers: {e}")
-    
-    # === MÉTODO 3: Buscar en cualquier lugar visible de la página ===
-    if match_info["seconds_remaining"] == 0:
-        try:
-            # Buscar cualquier countdown visible
-            any_timer = page.locator("[data-bind*='time:']")
-            for idx in range(min(any_timer.count(), 5)):  # Revisar los primeros 5
-                try:
-                    timer_el = any_timer.nth(idx)
-                    if timer_el.is_visible(timeout=500):
-                        timer_text = timer_el.inner_text()
-                        # Verificar que parece un countdown (contiene d, h, m, s)
-                        if any(x in timer_text.lower() for x in ['d ', 'h ', 'm ', 's']):
-                            seconds = parse_countdown(timer_text)
-                            if seconds > 0:
-                                match_info["countdown_text"] = timer_text
-                                match_info["seconds_remaining"] = seconds
+            print(f"    ⚠️ Error en Método 1: {e}")
+        
+        # === MÉTODO 2: Dropdown #timers (Si no tenemos timer aún) ===
+        if match_info["seconds_remaining"] == 0:
+            try:
+                timers_btn = page.locator("#timers")
+                if timers_btn.count() > 0:
+                    # Intento de click con timeout corto
+                    try:
+                        timers_btn.first.click(timeout=3000)
+                    except Exception:
+                        # Si falla el click, probablemente hay un MODAL
+                        # Si estamos en el primer intento, lanzamos error para provocar el RELOAD
+                        if attempt == 0:
+                            print("    ⚠️ Bloqueo detectado al hacer click en timers (posible modal).")
+                            raise Exception("ModalBlockingError")
+                        else:
+                            pass # Si ya recargamos y sigue fallando, desistimos
+                    
+                    # Si el click funcionó:
+                    time.sleep(1)
+                    
+                    # Buscar en dropdown
+                    nm_cont = page.locator(".next-match-container span[data-bind*='secondsRemaining']")
+                    if nm_cont.count() > 0:
+                        txt = nm_cont.first.inner_text()
+                        match_info["countdown_text"] = txt
+                        match_info["seconds_remaining"] = parse_countdown(txt)
+                        match_info["timer_state"] = "in_progress"
+                        print(f"    ℹ️ Countdown obtenido del dropdown: {txt}")
+                    
+                    # Matchday en dropdown
+                    if match_info["matchday"] == 0:
+                        md_drp = page.locator(".next-match-container .matchday-title, .dropdown-menu .matchday-title")
+                        if md_drp.count() > 0:
+                            txt = md_drp.first.inner_text()
+                            m = re.search(r'(\d+)', txt)
+                            if m: match_info["matchday"] = int(m.group(1))
+
+                    # Cerrar dropdown
+                    try: page.keyboard.press("Escape")
+                    except: pass
+
+            except Exception as e:
+                # Si fue el error provocado "ModalBlockingError", el bloque except externo lo maneja (o el if attempt logic)
+                # Como estamos dentro del `try` de timers, manejamos la logica de retry aqui
+                if "ModalBlockingError" in str(e):
+                    print("    🔄 Aplicando Reload (F5) para limpiar modales...")
+                    page.reload(wait_until="domcontentloaded")
+                    handle_popups(page)
+                    continue # Siguiente intento del for
+                print(f"    ⚠️ Error con dropdown timers: {e}")
+        
+        # === MÉTODO 3: Fallback cualquier texto timer (solo si seguimos sin info) ===
+        if match_info["seconds_remaining"] == 0:
+            try:
+                any_timer = page.locator("[data-bind*='time:']")
+                for idx in range(min(any_timer.count(), 3)):
+                    t_el = any_timer.nth(idx)
+                    if t_el.is_visible(timeout=500):
+                        txt = t_el.inner_text()
+                        if any(x in txt.lower() for x in ['d ', 'h ', 'm ', 's']):
+                            match_info["seconds_remaining"] = parse_countdown(txt)
+                            if match_info["seconds_remaining"] > 0:
                                 match_info["timer_state"] = "in_progress"
-                                print(f"    ℹ️ Countdown encontrado: {timer_text}")
+                                print(f"    ℹ️ Countdown encontrado (fallback): {txt}")
                                 break
-                except:
-                    continue
-        except:
-            pass
-    
-    # === Extraer árbitro (si no se obtuvo antes) ===
-    if not match_info["referee_name"]:
-        try:
-            referee_icon = page.locator(".next-match-referee, .icon-referee")
-            if referee_icon.count() > 0:
-                classes = referee_icon.first.get_attribute("class") or ""
-                strictness_map = {
-                    "verylenient": "Very Lenient",
-                    "lenient": "Lenient", 
-                    "verystrict": "Very Strict",
-                    "strict": "Strict",
-                    "average": "Average"
-                }
-                for cls, name in strictness_map.items():
-                    if cls in classes.lower():
-                        match_info["referee_strictness"] = name
-                        break
-        except:
-            pass
-    
-    # Si timer_state sigue unknown, marcarlo como finished
-    if match_info["timer_state"] == "unknown":
-        match_info["timer_state"] = "finished" if match_info["seconds_remaining"] == 0 else "in_progress"
-    
-    return match_info
+            except: pass
+
+        # Si llegamos aquí y tenemos datos o se acabaron los intentos, retornamos
+        # Árbitro Strictness Check
+        if not match_info["referee_strictness"]:
+            try:
+                icon = page.locator(".next-match-referee, .icon-referee").first
+                if icon.count() > 0:
+                    cls = icon.get_attribute("class") or ""
+                    if "verylenient" in cls.lower(): match_info["referee_strictness"] = "Very Lenient"
+                    elif "lenient" in cls.lower(): match_info["referee_strictness"] = "Lenient"
+                    elif "verystrict" in cls.lower(): match_info["referee_strictness"] = "Very Strict"
+                    elif "strict" in cls.lower(): match_info["referee_strictness"] = "Strict"
+                    elif "average" in cls.lower(): match_info["referee_strictness"] = "Average"
+            except: pass
+        
+        if match_info["timer_state"] == "unknown":
+            match_info["timer_state"] = "finished" if match_info["seconds_remaining"] == 0 else "in_progress"
+            
+        return match_info
+            
+    return match_info # Should not reach here typically due to return inside loop
+
 
 
 def get_minimum_tactics_delay(next_matches_info: list) -> tuple:

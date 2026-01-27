@@ -852,7 +852,7 @@ def run_update_for_user(user_id):
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
             is_gha = os.getenv("GITHUB_ACTIONS") == "true"
-            browser = p.chromium.launch(headless=True if is_gha else True, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
             context = browser.new_context(viewport={'width': 1280, 'height': 720})
             page = context.new_page()
             

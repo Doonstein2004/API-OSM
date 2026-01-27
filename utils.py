@@ -17,7 +17,8 @@ def handle_popups(page: Page):
         page.add_style_tag(content="""
             #preloader-image, .modal-backdrop, #genericModalContainer, 
             .social-login-modal, #social-login-container, .facebook-login-button, 
-            iframe[src*="facebook"], #manager-social-login { 
+            iframe[src*="facebook"], #manager-social-login,
+            #skillRatingUpdate-modal-content, .tier-up-title, .shield-animation-container { 
                 display: none !important; 
                 visibility: hidden !important; 
                 pointer-events: none !important; 
