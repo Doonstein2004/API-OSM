@@ -176,7 +176,7 @@ def get_match_results(page, scrape_future_fixtures=False):
                             time.sleep(0.5)
 
                             # --- EXTRACCIÓN DE DETALLES MEJORADA ---
-                            details_data = page.evaluate("""() => {
+                            details_data = page.evaluate(r"""() => {
                                 const modal = document.querySelector('.modal-content');
                                 if (!modal) return null;
 
