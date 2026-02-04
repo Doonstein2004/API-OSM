@@ -771,7 +771,7 @@ def get_osm_credentials(conn, user_id):
         creds = cur.fetchone()
         if not creds or not creds['osm_username'] or not creds['osm_password']:
             return None, None, None
-        return creds['osm_username'], creds['osm_password'], creds['fcm_token']
+        return creds['osm_username'].strip(), creds['osm_password'].strip(), creds['fcm_token']
 
 def invalidate_user_credentials(conn, user_id):
     print(f"⛔ CREDENCIALES INCORRECTAS DETECTADAS. Invalidando usuario {user_id}...")
@@ -854,7 +854,7 @@ def run_update_for_user(user_id):
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
             is_gha = os.getenv("GITHUB_ACTIONS") == "true"
-            browser = p.chromium.launch(headless=True if is_gha else True, args=["--no-sandbox"])
+            browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
             context = browser.new_context(viewport={'width': 1280, 'height': 720})
             page = context.new_page()
             
