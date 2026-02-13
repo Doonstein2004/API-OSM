@@ -4,9 +4,9 @@ name: Scheduled Tactics Processor
 
 on:
   workflow_dispatch:  # Para pruebas manuales
- # schedule:
-    # Ejecutar cada 10 minutos para verificar y procesar tareas pendientes de tácticas
-   # - cron: '*/10 * * * *'
+  schedule:
+     Ejecutar cada 10 minutos para verificar y procesar tareas pendientes de tácticas
+    - cron: '*/10 * * * *'
 
 jobs:
   process-scheduled-tactics:
