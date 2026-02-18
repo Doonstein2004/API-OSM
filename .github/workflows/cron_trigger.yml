@@ -2,9 +2,9 @@ name: Scheduled Scrape Trigger
 
 on:
   workflow_dispatch:
-   schedule:
-     # Ejecutar cada 3 horas (8 veces al día)
-      - cron: '0 */3 * * *'
+  schedule:
+    # Ejecutar cada 3 horas (8 veces al día)
+    - cron: '0 */3 * * *'
 
 jobs:
   trigger-vercel-endpoint:
