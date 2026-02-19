@@ -409,6 +409,14 @@ def sync_matches(conn, matches_data, processed_leagues, user_id):
 
             data_tuples = []
             for m in matches_info["matches"]:
+                # FIX: Invertir orden de tarjetas visitantes (Away Cards) para corregir visualización en App
+                # El usuario reporta que las amarillas salen como rojas. Invertimos "X Y" a "Y X".
+                if 'statistics' in m and 'Cards' in m['statistics'] and 'away' in m['statistics']['Cards']:
+                    val = str(m['statistics']['Cards']['away']).strip()
+                    parts = val.split()
+                    if len(parts) == 2:
+                        m['statistics']['Cards']['away'] = f"{parts[1]} {parts[0]}"
+
                 data_tuples.append((
                     user_id, league_id, m['round'], m['home_team'], m['home_manager'], 
                     m['away_team'], m['away_manager'], m['home_goals'], m['away_goals'], 
