@@ -134,7 +134,17 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
             
             if scores:
                 winner = max(scores, key=scores.get)
-                if scores[winner] > len(current_competitors) * 0.3:
+                
+                # Check for generic teams (battles/tournaments)
+                is_generic = any("team red" in t or "team blue" in t for t in current_competitors)
+                
+                if dashboard_name in scores and scores[dashboard_name] > len(current_competitors) * 0.3:
+                    best_match = dashboard_name
+                    print(f"  - [{idx}] '{dashboard_name}' -> '{best_match}' (Match exacto priorizado)")
+                elif is_generic:
+                    best_match = dashboard_name
+                    print(f"  - [{idx}] '{dashboard_name}' -> '{best_match}' (Equipos genéricos, preservado)")
+                elif scores[winner] > len(current_competitors) * 0.3:
                     best_match = winner
                     print(f"  - [{idx}] '{dashboard_name}' -> '{best_match}' (Match competidores)")
         
@@ -148,9 +158,9 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
 
     return active_leagues_list
 
-def find_matching_active_league(conn, user_id, dashboard_name, current_managers_set, excluded_ids=None):
+def find_matching_active_league(conn, user_id, dashboard_name, current_managers_dict, excluded_ids=None):
     """
-    Busca una liga existente en TODA la BD (no solo del usuario) que coincida con el fingerprint de managers.
+    Busca una liga existente en TODA la BD (no solo del usuario) que coincida con el fingerprint de managers (Team -> Manager).
     Retorna (league_id, needs_new_link) donde needs_new_link indica si hay que vincular al usuario.
     """
     if excluded_ids is None: excluded_ids = set()
@@ -172,21 +182,31 @@ def find_matching_active_league(conn, user_id, dashboard_name, current_managers_
         for row in candidates:
             if row['id'] in excluded_ids: continue # Saltar IDs ya usados
 
-            saved_mgrs = set((row['managers_by_team'] or {}).values())
-            if not saved_mgrs:
+            saved_mgrs_dict = row['managers_by_team'] or {}
+            
+            # Limpiar mánagers nulos o 'N/A'
+            saved_mgrs_clean = {k: v for k, v in saved_mgrs_dict.items() if v and v != "N/A"}
+            
+            if not saved_mgrs_clean:
                 # Priorizar liga vacía si no hay match
                 if best_id is None: best_id = row['id']
                 continue
             
-            common = current_managers_set.intersection(saved_mgrs)
-            ratio = len(common) / len(saved_mgrs)
+            # Comparar el mapa (Team -> Manager)
+            matches = 0
+            for team, mgr in saved_mgrs_clean.items():
+                if current_managers_dict.get(team) == mgr:
+                    matches += 1
+                    
+            ratio = matches / len(saved_mgrs_clean) if len(saved_mgrs_clean) > 0 else 0
             
             if ratio > best_ratio:
                 best_ratio = ratio
                 best_id = row['id']
         
         if best_id:
-            match_found = best_ratio > 0.70 or (best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids)
+            # Consideramos un match si al menos el 50% de los mánagers guardados coinciden en sus respectivos equipos
+            match_found = best_ratio > 0.50 or (best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids)
             if match_found:
                 # Verificar si el usuario ya está vinculado a esta liga
                 cur.execute("SELECT 1 FROM user_leagues WHERE user_id = %s AND league_id = %s", (user_id, best_id))
@@ -209,12 +229,13 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
         # Recuperar datos usando el índice
         ls_data = standings_data[idx]
         
-        curr_mgrs = set()
+        curr_mgrs_dict = {}
         for t in ls_data.get("standings", []):
             m = t.get("Manager", "N/A")
-            if m and m != "N/A": curr_mgrs.add(m)
+            if m and m != "N/A": 
+                curr_mgrs_dict[t["Club"]] = m
         
-        matched_id, needs_link = find_matching_active_league(conn, user_id, dash_name, curr_mgrs, confirmed_ids)
+        matched_id, needs_link = find_matching_active_league(conn, user_id, dash_name, curr_mgrs_dict, confirmed_ids)
         
         final_id = None
         
