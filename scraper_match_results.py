@@ -267,8 +267,17 @@ def get_match_results(page, scrape_future_fixtures=False):
                                         let hVal = hEl ? hEl.innerText.trim() : "0";
                                         let aVal = aEl ? aEl.innerText.trim() : "0";
                                         
-                                        hVal = hVal.replace('%', '').replace(/[^\d]/g, '');
-                                        aVal = aVal.replace('%', '').replace(/[^\d]/g, '');
+                                        // Console debug (puedes verlo en las DevTools del navegador si hace falta)
+                                        // console.log(`[DEBUG] Stat ${key} -> Home Raw: "${hVal}" | Away Raw: "${aVal}"`);
+
+                                        if (key === 'Formation') {
+                                            // Preservar las letras "A" o "B".
+                                            hVal = hVal.replace(/\s+/g, ' ').trim();
+                                            aVal = aVal.replace(/\s+/g, ' ').trim();
+                                        } else {
+                                            hVal = hVal.replace('%', '').replace(/[^\d]/g, '');
+                                            aVal = aVal.replace('%', '').replace(/[^\d]/g, '');
+                                        }
                                         
                                         if(key === 'Cards') {
                                             const hYellow = hEl.querySelector('.icon-player-yellowcard');
