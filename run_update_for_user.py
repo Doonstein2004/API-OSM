@@ -370,7 +370,7 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
                     "round": int(transfer.get("Gameweek", 0)),
                     "baseValue": parse_value_string(transfer.get("Value")),
                     "finalPrice": parse_value_string(transfer.get("Price")),
-                    "createdAt": datetime.now()
+                    "createdAt": transfer.get("Date", datetime.now())
                 })
             except: continue
     return dict(grouped)
