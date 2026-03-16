@@ -64,6 +64,36 @@ def parse_value_string(value_str):
     try: return float(value_str) / 1_000_000
     except: return 0
 
+def parse_osm_date(date_str):
+    if not isinstance(date_str, str): return datetime.now()
+    date_str = date_str.strip()
+    now = datetime.now()
+    import re
+    
+    # Format: "00:16" or "15:30" (Today's time)
+    if re.match(r'^\d{1,2}:\d{2}$', date_str):
+        parts = date_str.split(':')
+        try:
+            return now.replace(hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0)
+        except:
+            return now
+            
+    # Format: "yesterday" o "ayer"
+    if date_str.lower() in ("yesterday", "ayer"):
+        from datetime import timedelta
+        return now - timedelta(days=1)
+        
+    # Format "15/03/2026", "13 Mar", or similar dates
+    try:
+        from dateutil import parser
+        parsed = parser.parse(date_str, fuzzy=True)
+        return parsed
+    except:
+        pass
+
+    # Default fallback
+    return now
+
 def normalize_team_name(name):
     if not isinstance(name, str): return ""
     prefixes = ["fk ", "ca ", "fc ", "cd "]
@@ -370,7 +400,7 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
                     "round": int(transfer.get("Gameweek", 0)),
                     "baseValue": parse_value_string(transfer.get("Value")),
                     "finalPrice": parse_value_string(transfer.get("Price")),
-                    "createdAt": transfer.get("Date", datetime.now())
+                    "createdAt": parse_osm_date(transfer.get("Date"))
                 })
             except: continue
     return dict(grouped)
