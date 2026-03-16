@@ -162,7 +162,7 @@ def translate_and_group_transfers(fichajes_data, team_to_resolved_league):
             from_manager, to_manager = (from_parts[1] if len(from_parts) > 1 else None, to_parts[1] if len(to_parts) > 1 else None)
             managerName, transaction_type = (to_manager, 'purchase') if to_manager else (from_manager, 'sale')
             if managerName and transaction_type:
-                grouped_transfers[league_name].append({"playerName": transfer.get("Name"), "managerName": managerName, "transactionType": transaction_type, "position": transfer.get("Position"), "round": int(transfer.get("Gameweek", 0)), "baseValue": parse_value_string(transfer.get("Value")), "finalPrice": parse_value_string(transfer.get("Price")), "createdAt": datetime.now()})
+                grouped_transfers[league_name].append({"playerName": transfer.get("Name"), "managerName": managerName, "transactionType": transaction_type, "position": transfer.get("Position"), "round": int(transfer.get("Gameweek", 0)), "baseValue": parse_value_string(transfer.get("Value")), "finalPrice": parse_value_string(transfer.get("Price")), "createdAt": transfer.get("Date", datetime.now())})
     return dict(grouped_transfers)
 
 def upload_data_to_postgres(conn, grouped_transfers, league_id_map):
