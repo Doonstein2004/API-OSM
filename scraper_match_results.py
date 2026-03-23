@@ -75,7 +75,8 @@ def get_match_results(page, scrape_future_fixtures=False):
             
             try:
                 print(f"  - Navegando a Resultados...")
-                if not safe_navigate(page, RESULTS_URL, verify_selector="table.table-sticky"):
+                target_url = "https://en.onlinesoccermanager.com/League/Matches" if scrape_future_fixtures else RESULTS_URL
+                if not safe_navigate(page, target_url, verify_selector="table.table-sticky"):
                     print("  ❌ No se pudo cargar la tabla de resultados. Saltando.")
                     continue
                 
@@ -91,10 +92,28 @@ def get_match_results(page, scrape_future_fixtures=False):
                 # --- EXTRACT ROWS VIA JS (Solo para saber cuántas son y su estado básico) ---
                 match_rows_data = page.evaluate("""() => {
                     const rows = Array.from(document.querySelectorAll("table.table-sticky tbody tr"));
-                    return rows.map((r, i) => {
-                        const isClickable = r.classList.contains('clickable') || r.getAttribute('onclick');
+                    let currentRound = 0;
+                    
+                    const extracted = [];
+                    for(let i=0; i<rows.length; i++){
+                        const r = rows[i];
+                        
+                        // Verificar si es un header de matchday (EJ: "Matchday 5" o "Jornada 5")
+                        const headerEl = r.querySelector('td[colspan] span') || r.querySelector('td span') || r;
+                        const txtFull = headerEl.innerText.trim();
+                        const matchdayRegex = /(?:matchday|jornada|round|week|rodada|rnd)\\s*(\\d+)/i;
+                        const m = txtFull.match(matchdayRegex);
+                        if (m) {
+                            currentRound = parseInt(m[1], 10);
+                            continue; // Saltar fila de encabezado
+                        }
+                        
                         const home = r.querySelector('.td-home .font-sm');
                         const away = r.querySelector('.td-away .font-sm');
+                        
+                        if(!home || !away) continue; // Si no hay equipos validos
+                        
+                        const isClickable = r.classList.contains('clickable') || r.getAttribute('onclick');
                         const scoreEl = r.querySelector('.match-score span') || r.querySelector('span[data-bind*="score"]');
                         
                         let isPlayed = false;
@@ -116,17 +135,19 @@ def get_match_results(page, scrape_future_fixtures=False):
                         const hMgrEl = r.querySelector('.td-home .text-secondary');
                         const aMgrEl = r.querySelector('.td-away .text-secondary');
 
-                        return {
+                        extracted.push({
                             idx: i,
+                            round: currentRound,
                             is_played: isPlayed,
-                            home_team: home ? home.innerText.trim() : "Unknown",
-                            away_team: away ? away.innerText.trim() : "Unknown",
+                            home_team: home.innerText.trim(),
+                            away_team: away.innerText.trim(),
                             home_manager: hMgrEl ? hMgrEl.innerText.trim() : "CPU",
                             away_manager: aMgrEl ? aMgrEl.innerText.trim() : "CPU",
                             home_goals: hGoals,
                             away_goals: aGoals
-                        };
-                    });
+                        });
+                    }
+                    return extracted;
                 }""")
                 
                 print(f"  - Encontrados {len(match_rows_data)} partidos en lista.")
@@ -140,7 +161,7 @@ def get_match_results(page, scrape_future_fixtures=False):
 
                     # Objeto base
                     match_obj = {
-                        "round": round_number,
+                        "round": m_info.get("round") if m_info.get("round") > 0 else round_number,
                         "home_team": m_info['home_team'],
                         "home_manager": m_info['home_manager'],
                         "away_team": m_info['away_team'],
