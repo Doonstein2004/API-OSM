@@ -9,10 +9,26 @@ class InvalidCredentialsError(Exception):
 
 def handle_popups(page: Page):
     """
-    Versión v4.0: Cierra modales de forma más agresiva.
-    Incluye reintentos y manejo de modales que bloquean interacción.
+    Versión v4.2: Cierra modales agresivos, incluyendo el aviso de Password Login (que es un div, no un button).
     """
-    # 1. Inyectamos CSS agresivo para ocultar elementos sociales y bloqueadores
+    try:
+        # El botón "I understand" es a veces un div con clase btn-new
+        understand_selectors = [
+            "button:has-text('I understand')",
+            "div.btn-new:has-text('I understand')",
+            ".modal-content .btn-new",
+            "button:has-text('Entiendo')",
+            "div.btn-new:has-text('Entiendo')"
+        ]
+        for sel in understand_selectors:
+            loc = page.locator(sel)
+            if loc.is_visible(timeout=500):
+                loc.click(force=True)
+                page.wait_for_timeout(1000)
+                break
+    except:
+        pass
+
     try:
         page.add_style_tag(content="""
             #preloader-image, .modal-backdrop, #genericModalContainer, 
@@ -27,21 +43,13 @@ def handle_popups(page: Page):
     except:
         pass
     
-    # 2. JS para cerrar activamente cualquier modal visible
     try:
         page.evaluate("""
-            // Cerrar modales con click en close button
             document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
-                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss="modal"], .close-button-container button');
-                if (closeBtn) {
-                    closeBtn.click();
-                }
+                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss='modal'], .close-button-container button');
+                if (closeBtn) closeBtn.click();
             });
-            
-            // Eliminar backdrops y preloaders
             document.querySelectorAll('#preloader-image, .modal-backdrop').forEach(el => el.remove());
-            
-            // Forzar cierre de modales que no respondieron al click
             setTimeout(() => {
                 document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
                     modal.classList.remove('in', 'show');
@@ -49,14 +57,11 @@ def handle_popups(page: Page):
                 });
                 document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
                 document.body.classList.remove('modal-open');
-                document.body.style.overflow = '';
-                document.body.style.paddingRight = '';
             }, 100);
         """)
     except:
         pass
     
-    # 3. Fallback: presionar Escape para cerrar modales
     try:
         modal_visible = page.locator(".modal.in, .modal.show")
         if modal_visible.count() > 0:
