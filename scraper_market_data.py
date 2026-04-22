@@ -65,20 +65,14 @@ def get_market_data(page: Page):
                 
                 if safe_navigate(page, TRANSFERS_URL, verify_selector="#transfer-list"):
                     # B. ESPERA INTELIGENTE DE DATOS
-                    # No basta con que este la tabla, esperamos a que haya filas 'clickable' (jugadores)
                     print("  - Esperando renderizado de jugadores...")
                     try:
-                        # Esperamos hasta 15 segundos a que aparezca al menos una fila de jugador
                         page.wait_for_selector("#transfer-list table.table-sticky tbody tr.clickable", state="visible", timeout=15000)
-                        
-                        # Pequeña pausa extra para asegurar que se pintaron todos los textos
                         time.sleep(2) 
                     except TimeoutError:
                         print("    ⚠️ Tiempo de espera agotado: La tabla sigue vacía (¿Mercado vacío o fallo de carga?).")
-                        # Opcional: Tomar captura para depurar si sale 0 siempre
-                        # page.screenshot(path=f"debug_market_empty_{i}.png")
                     
-                
+                    
                     # JS mejorado para encontrar los datos sin importar la estructura exacta
                     players_on_sale_raw = page.evaluate("""
                         () => {
@@ -93,8 +87,6 @@ def get_market_data(page: Page):
                                 const cols = row.querySelectorAll("td");
                                 
                                 // FALLBACK PARA EL PRECIO: 
-                                // 1. Intentamos data.price (observable)
-                                // 2. Intentamos leer el texto de la última columna
                                 let price = 0;
                                 if (typeof data.price === 'function') price = data.price();
                                 else if (data.price) price = data.price;
@@ -126,9 +118,6 @@ def get_market_data(page: Page):
                     players_on_sale = []
                     for p in players_on_sale_raw:
                         try:
-                            # Limpiamos y convertimos a millones
-                            # Si price_val ya es un número grande (ej 78600000), dividimos
-                            # Si es un string como "78.6", lo tratamos como tal
                             raw_p = str(p.get('price_val', 0)).lower()
                             raw_v = str(p.get('value_val', 0)).lower()
                             
@@ -136,17 +125,12 @@ def get_market_data(page: Page):
                                 clean = ''.join(filter(lambda x: x.isdigit() or x == '.' or x == ',', val_str)).replace(',', '.')
                                 if not clean: return 0.0
                                 num = float(clean)
-                                # Si el número es mayor a 10000, asumimos que viene en unidades completas (ej. 15000000)
                                 if num > 10000: return round(num / 1_000_000, 2)
                                 return round(num, 2)
 
                             p['price'] = to_million(raw_p)
                             p['value'] = to_million(raw_v)
                             
-                            # Debug preventivo
-                            # print(f"    [CHECK] {p['name']}: {p['price']}M | {p['value']}M")
-                            
-                            # Limpiar campos temporales
                             del p['price_val']
                             del p['value_val']
                             players_on_sale.append(p)
@@ -169,12 +153,29 @@ def get_market_data(page: Page):
                 history_tab.click()
                 try:
                     page.wait_for_selector("#transfer-history table.table", timeout=10000)
-                    # Cargar más un par de veces
-                    for _ in range(3):
+                    
+                    # Cargar historial exhaustivo con límite de seguridad
+                    max_clicks = 150 # Límite para evitar bucles infinitos en caso de error de la UI
+                    clicks_done = 0
+                    
+                    while clicks_done < max_clicks:
                         btn = page.locator('button:has-text("More transfers")')
-                        if btn.is_visible(timeout=500): 
-                            btn.click()
-                            time.sleep(0.5)
+                        
+                        # Timeout bajo para salir rápido del bucle cuando el botón ya no esté
+                        if btn.is_visible(timeout=1000): 
+                            try:
+                                btn.click()
+                                time.sleep(0.5) # Pausa necesaria para permitir la solicitud de red
+                                clicks_done += 1
+                            except Exception as click_err:
+                                print(f"    ⚠️ Interrupción al clickear 'More transfers': {click_err}")
+                                break # Salir si el botón existe pero no es interactuable
+                        else:
+                            # El botón ya no es visible, se cargó todo el historial
+                            break
+                            
+                    if clicks_done == max_clicks:
+                        print("    ⚠️ Se alcanzó el límite máximo de clicks en el historial.")
 
                     hist_list = page.evaluate("""() => {
                         const rows = Array.from(document.querySelectorAll("#transfer-history table.table tbody tr"));
