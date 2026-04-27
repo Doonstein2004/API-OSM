@@ -220,6 +220,16 @@ def load_session_from_db(conn, user_id: str) -> dict | None:
     """
     try:
         with conn.cursor() as cur:
+            # Auto-crear tabla si no existe (misma lógica que save)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.user_browser_sessions (
+                    user_id UUID PRIMARY KEY,
+                    session_state TEXT NOT NULL,
+                    saved_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            conn.commit()
+
             cur.execute("""
                 SELECT session_state, saved_at
                 FROM public.user_browser_sessions
@@ -241,6 +251,10 @@ def load_session_from_db(conn, user_id: str) -> dict | None:
             return json.loads(row['session_state'])
     except Exception as e:
         print(f"  ⚠️ No se pudo leer la sesión de la BD: {e}")
+        try:
+            conn.rollback()  # Limpiar transacción abortada para no bloquear próximas queries
+        except:
+            pass
         return None
 
 
