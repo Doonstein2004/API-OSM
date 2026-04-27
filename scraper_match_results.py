@@ -8,6 +8,72 @@ from utils import handle_popups, safe_int, safe_navigate
 
 load_dotenv()
 
+# --- TABLA SELECTOR AMPLIADO ---
+# OSM usa 'table.table-sticky' en algunas vistas y simplemente 'table' en otras.
+# Definimos los posibles selectores en orden de prioridad.
+RESULTS_TABLE_SELECTORS = [
+    "table.table-sticky",
+    "#results-list table",
+    "#matches-list table",
+    "#fixtures-list table",
+    ".league-results table",
+]
+
+def _navigate_to_league_tab_in_spa(page, tab_href: str, verify_selector: str, timeout_ms: int = 15000) -> bool:
+    """
+    Navega a una pestaña de la SPA de OSM usando el menú interno.
+    EVITA usar page.goto() directo que destruye el contexto de equipo activo.
+    
+    Estrategia:
+      1. Buscar el link del menú que apunte a tab_href (ej /League/Results)
+      2. Si existe: click → esperar selector
+      3. Si no: fallback a page.goto() con 3 reintentos y espera más larga
+    """
+    try:
+        # Intentar encontrar en el menú de navegación lateral/top
+        nav_link = page.locator(f"a[href*='{tab_href}']").first
+        if nav_link.is_visible(timeout=3000):
+            nav_link.click()
+            # Esperar a que la ruta de la SPA cambie y el contenido aparezca
+            try:
+                page.wait_for_url(f"**{tab_href}**", timeout=8000)
+            except:
+                pass
+            # Esperar al selector con múltiples opciones
+            for sel in RESULTS_TABLE_SELECTORS + [verify_selector]:
+                try:
+                    page.wait_for_selector(sel, timeout=timeout_ms, state="visible")
+                    print(f"  ✓ Navegación SPA OK (selector '{sel}')")
+                    return True
+                except:
+                    continue
+            print("  ⚠️ Click en nav exitoso pero tabla no apareció. Probando fallback.")
+    except Exception as e:
+        print(f"  ⚠️ Nav SPA falló ({e}). Usando fallback goto().")
+
+    # --- FALLBACK: goto con reintentos ---
+    full_url = f"https://en.onlinesoccermanager.com{tab_href}"
+    for attempt in range(3):
+        try:
+            page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)  # Dar tiempo al SPA para hidratarse
+            for sel in RESULTS_TABLE_SELECTORS + [verify_selector]:
+                try:
+                    page.wait_for_selector(sel, timeout=12000, state="visible")
+                    print(f"  ✓ Fallback goto() OK (selector '{sel}' en intento {attempt+1})")
+                    return True
+                except:
+                    continue
+            print(f"  ⚠️ Intento {attempt+1}/3: tabla no apareció, reintentando...")
+            page.reload(wait_until="domcontentloaded")
+            time.sleep(2)
+        except Exception as e:
+            print(f"  ⚠️ Error goto() intento {attempt+1}/3: {e}")
+            time.sleep(3)
+
+    print(f"  ❌ Fallo definitivo navegando a {full_url}")
+    return False
+
 def get_match_results(page, scrape_future_fixtures=False):
     """
     Extrae los resultados. V4.1 FIXED - Corregida extracción de eventos, stats y ratings.
@@ -75,10 +141,12 @@ def get_match_results(page, scrape_future_fixtures=False):
             
             try:
                 print(f"  - Navegando a Resultados...")
-                target_url = "https://en.onlinesoccermanager.com/League/Matches" if scrape_future_fixtures else RESULTS_URL
-                if not safe_navigate(page, target_url, verify_selector="table.table-sticky"):
+                tab_path = "/League/Fixtures" if scrape_future_fixtures else "/League/Results"
+                if not _navigate_to_league_tab_in_spa(page, tab_path, verify_selector="table.table-sticky"):
                     print("  ❌ No se pudo cargar la tabla de resultados. Saltando.")
                     continue
+                # Pequeña pausa extra para estabilización del DOM
+                time.sleep(1)
                 
                 # --- JORNADA ---
                 round_number = 0
@@ -90,8 +158,15 @@ def get_match_results(page, scrape_future_fixtures=False):
                 print(f"  - Jornada detectada: {round_number}")
 
                 # --- EXTRACT ROWS VIA JS (Solo para saber cuántas son y su estado básico) ---
+                # Usar selector amplio para compatibilidad con distintas vistas
                 match_rows_data = page.evaluate("""() => {
-                    const rows = Array.from(document.querySelectorAll("table.table-sticky tbody tr"));
+                    const tableSelectors = ['table.table-sticky', '#results-list table', '#matches-list table', '.league-results table', 'table'];
+                    let tableEl = null;
+                    for (const sel of tableSelectors) {
+                        tableEl = document.querySelector(sel);
+                        if (tableEl) break;
+                    }
+                    const rows = tableEl ? Array.from(tableEl.querySelectorAll('tbody tr')) : [];
                     let currentRound = 0;
                     
                     const extracted = [];
@@ -180,7 +255,13 @@ def get_match_results(page, scrape_future_fixtures=False):
                         print(f"    🔍 Detalles para {m_info['home_team']} vs {m_info['away_team']}...")
                         
                         # --- CLICK ---
-                        row_locator = page.locator("table.table-sticky tbody tr").nth(m_info['idx'])
+                        # Usar el selector más amplio posible para la tabla
+                        table_sel = "table.table-sticky"
+                        for _sel in RESULTS_TABLE_SELECTORS:
+                            if page.locator(_sel).count() > 0:
+                                table_sel = _sel
+                                break
+                        row_locator = page.locator(f"{table_sel} tbody tr").nth(m_info['idx'])
                         
                         try:
                             # Click con retry

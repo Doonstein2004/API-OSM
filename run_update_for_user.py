@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 
 # --- Módulos Locales ---
-from utils import login_to_osm, InvalidCredentialsError 
+from utils import login_to_osm, InvalidCredentialsError, login_with_session_cache
 from notifications import init_firebase_admin, analyze_and_notify
 
 # --- Importar las funciones de los scrapers ---
@@ -914,14 +914,23 @@ def run_update_for_user(user_id):
         with sync_playwright() as p:
             is_gha = os.getenv("GITHUB_ACTIONS") == "true"
             browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
-            context = browser.new_context(viewport={'width': 1280, 'height': 720})
-            page = context.new_page()
             
             try:
-                if not login_to_osm(page, osm_username, osm_password): raise Exception("Login fallido")
+                context, page = login_with_session_cache(
+                    browser, conn, user_id, osm_username, osm_password
+                )
             except InvalidCredentialsError:
                 print("❌ ERROR FATAL: Credenciales incorrectas.")
                 invalidate_user_credentials(conn, user_id)
+                # Eliminar sesión cacheada inválida
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM public.user_browser_sessions WHERE user_id = %s", (user_id,))
+                    conn.commit()
+                except: pass
+                conn.close(); return
+            except Exception as e:
+                print(f"❌ Error durante login: {e}")
                 conn.close(); return
 
             print("\n[1/4] 📡 Scraping datos principales...")
@@ -936,6 +945,7 @@ def run_update_for_user(user_id):
             tactics_data = get_tactics_data(page)
             
             print("✅ Scraping OK.")
+            context.close()
             
     except Exception as e:
         print(f"❌ Error scraping: {e}")

@@ -12,20 +12,27 @@ def handle_popups(page: Page):
     Versión v4.2: Cierra modales agresivos, incluyendo el aviso de Password Login (que es un div, no un button).
     """
     try:
-        # El botón "I understand" es a veces un div con clase btn-new
         understand_selectors = [
             "button:has-text('I understand')",
             "div.btn-new:has-text('I understand')",
             ".modal-content .btn-new",
             "button:has-text('Entiendo')",
-            "div.btn-new:has-text('Entiendo')"
+            "div.btn-new:has-text('Entiendo')",
+            "button:has-text('Continue')",
+            "button:has-text('Continuar')",
+            "button:has-text('Skip')",
+            "button:has-text('Saltar')",
+            "button:has-text('View later')",
+            "button:has-text('Ver más tarde')"
         ]
         for sel in understand_selectors:
-            loc = page.locator(sel)
-            if loc.is_visible(timeout=500):
-                loc.click(force=True)
-                page.wait_for_timeout(1000)
-                break
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=500):
+                    loc.click(force=True)
+                    page.wait_for_timeout(500)
+            except:
+                pass
     except:
         pass
 
@@ -200,5 +207,133 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
     return False
 
 
+# ==========================================
+# SESSION CACHE (Playwright Storage State)
+# ==========================================
+
+SESSION_CACHE_TTL_HOURS = 18  # Sesiones de OSM duran ~24h, renovamos a las 18h
+
+def load_session_from_db(conn, user_id: str) -> dict | None:
+    """
+    Carga el estado de sesión del navegador (cookies + localStorage) desde la BD.
+    Retorna el dict de storage_state o None si no existe / expiró.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT session_state, saved_at
+                FROM public.user_browser_sessions
+                WHERE user_id = %s
+                LIMIT 1;
+            """, (user_id,))
+            row = cur.fetchone()
+            if not row:
+                return None
+            
+            from datetime import datetime, timedelta
+            age = datetime.now() - row['saved_at'].replace(tzinfo=None)
+            if age > timedelta(hours=SESSION_CACHE_TTL_HOURS):
+                print(f"  ⏳ Sesión cacheada expirada (hace {age}). Se hará login.")
+                return None
+            
+            print(f"  ✅ Sesión cacheada encontrada (hace {age.seconds // 3600}h {(age.seconds % 3600) // 60}m)")
+            import json
+            return json.loads(row['session_state'])
+    except Exception as e:
+        print(f"  ⚠️ No se pudo leer la sesión de la BD: {e}")
+        return None
 
 
+def save_session_to_db(conn, user_id: str, storage_state: dict):
+    """
+    Guarda el estado de sesión del navegador en la BD para reutilizarlo.
+    Auto-crea la tabla si no existe.
+    """
+    try:
+        with conn.cursor() as cur:
+            # Auto-migration: crear tabla si no existe
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS public.user_browser_sessions (
+                    user_id UUID PRIMARY KEY,
+                    session_state TEXT NOT NULL,
+                    saved_at TIMESTAMP DEFAULT NOW()
+                );
+            """)
+            import json
+            cur.execute("""
+                INSERT INTO public.user_browser_sessions (user_id, session_state, saved_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                    SET session_state = EXCLUDED.session_state,
+                        saved_at = NOW();
+            """, (user_id, json.dumps(storage_state)))
+        conn.commit()
+        print("  💾 Sesión guardada en BD para próximas ejecuciones.")
+    except Exception as e:
+        print(f"  ⚠️ No se pudo guardar la sesión en la BD: {e}")
+        try:
+            conn.rollback()
+        except:
+            pass
+
+
+def login_with_session_cache(browser, conn, user_id: str, osm_username: str, osm_password: str):
+    """
+    Crea un contexto de Playwright con sesión cacheada si existe.
+    Si la sesión expiró o es inválida, hace login normal y guarda la nueva sesión.
+    
+    Retorna: (context, page) listos para usar.
+    
+    Uso en run_update_for_user.py:
+        context, page = login_with_session_cache(browser, conn, user_id, username, password)
+    """
+    CAREER_URL = "https://en.onlinesoccermanager.com/Career"
+    SUCCESS_REGEX = re.compile(r".*/(Career|ChooseLeague)")
+    
+    # --- 1. Intentar restaurar sesión cacheada ---
+    cached_state = load_session_from_db(conn, user_id)
+    
+    if cached_state:
+        print("  🔄 Restaurando sesión cacheada...")
+        try:
+            context = browser.new_context(
+                storage_state=cached_state,
+                viewport={'width': 1280, 'height': 720}
+            )
+            page = context.new_page()
+            page.goto(CAREER_URL, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            handle_popups(page)
+            
+            # Verificar si la sesión sigue activa
+            if SUCCESS_REGEX.search(page.url):
+                print("  ✅ Sesión restaurada correctamente. Login omitido.")
+                return context, page
+            else:
+                print(f"  ⚠️ Sesión inválida (URL: {page.url}). Haciendo login...")
+                page.close()
+                context.close()
+        except Exception as e:
+            print(f"  ⚠️ Error restaurando sesión: {e}. Haciendo login...")
+            try:
+                page.close()
+                context.close()
+            except:
+                pass
+
+    # --- 2. Login normal ---
+    context = browser.new_context(viewport={'width': 1280, 'height': 720})
+    page = context.new_page()
+    
+    login_ok = login_to_osm(page, osm_username, osm_password)
+    if not login_ok:
+        raise Exception("Login fallido tras agotar reintentos")
+    
+    # --- 3. Guardar nueva sesión ---
+    try:
+        storage_state = context.storage_state()
+        save_session_to_db(conn, user_id, storage_state)
+    except Exception as e:
+        print(f"  ⚠️ No se pudo capturar el storage_state: {e}")
+    
+    return context, page
