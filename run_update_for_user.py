@@ -354,25 +354,26 @@ def sync_league_details(conn, standings_data, squad_values_data, processed_leagu
             cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(mgrs), league_id))
     conn.commit()
 
+def find_data_for_team(data_list, team_name):
+    norm_team = normalize_team_name(team_name)
+    for block in data_list:
+        if normalize_team_name(block.get("team_name", "")) == norm_team:
+            return block
+    return None
+
 def translate_and_group_transfers(fichajes_data, processed_leagues):
     grouped = defaultdict(list)
     processed_keys = set()
 
     for item in processed_leagues:
-        idx = item["data_index"]
         league_id = item["league_id"]
         managed_team = item.get("managed_team", "")
         
-        if idx >= len(fichajes_data): continue
-        team_block = fichajes_data[idx] # Acceso directo por Slot
+        team_block = find_data_for_team(fichajes_data, managed_team)
         
-        # VALIDACIÓN CRÍTICA: Verificar que el bloque de fichajes corresponde al equipo correcto
-        block_team_name = team_block.get("team_name", "")
-        if block_team_name and managed_team:
-            # Normalizar para comparación (minúsculas y sin espacios extra)
-            if normalize_team_name(block_team_name) != normalize_team_name(managed_team):
-                print(f"    ⚠️ Mismatch detectado: fichajes de '{block_team_name}' no coinciden con liga de '{managed_team}'. Saltando.")
-                continue
+        if not team_block:
+            print(f"    ⚠️ Mismatch detectado: fichajes para '{managed_team}' no encontrados. Saltando.")
+            continue
 
         for transfer in team_block.get("transfers", []):
             try:
@@ -410,11 +411,13 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
     print(f"  - Sincronizando mercado...")
     with conn.cursor() as cur:
         for item in processed_leagues:
-            idx = item["data_index"]
             league_id = item["league_id"]
+            managed_team = item.get("managed_team", "")
             
-            if idx >= len(transfer_list_data): continue
-            players = transfer_list_data[idx].get("players_on_sale", [])
+            team_block = find_data_for_team(transfer_list_data, managed_team)
+            if not team_block: continue
+            
+            players = team_block.get("players_on_sale", [])
 
             # Archivar viejos solo para ESTA liga
             cur.execute("UPDATE public.transfer_list_players SET is_active = FALSE WHERE league_id=%s AND is_active=TRUE", (league_id,))
@@ -450,12 +453,10 @@ def sync_matches(conn, matches_data, processed_leagues, user_id):
     print("\n⚽ Sincronizando resultados de partidos...")
     with conn.cursor() as cur:
         for item in processed_leagues:
-            idx = item["data_index"]
             league_id = item["league_id"]
+            managed_team = item.get("managed_team", "")
             
-            if idx >= len(matches_data): continue
-            
-            matches_info = matches_data[idx]
+            matches_info = find_data_for_team(matches_data, managed_team)
             if not matches_info or "matches" not in matches_info: continue
 
             data_tuples = []
@@ -569,15 +570,13 @@ def sync_tactics(conn, tactics_data, processed_leagues, user_id, current_round_m
     
     with conn.cursor() as cur:
         for item in processed_leagues:
-            idx = item["data_index"]
             league_id = item["league_id"]
             team_name = item.get("managed_team", "")
             league_name = item.get("dashboard_name", "")
             
-            if idx >= len(tactics_data):
+            tdata = find_data_for_team(tactics_data, team_name)
+            if not tdata:
                 continue
-            
-            tdata = tactics_data[idx]
             
             # Obtener la jornada actual para esta liga
             current_round = current_round_map.get(league_name, 0)
@@ -1015,16 +1014,19 @@ def run_update_for_user(user_id):
                                     print(f"    ℹ️ Jornada para '{league_name}' obtenida de standings: {max_played}")
                 
                 # Fuente 3: matches_data (max round de los partidos)
-                for idx, item in enumerate(processed_leagues):
+                for item in processed_leagues:
                     league_name = item.get("dashboard_name", "")
+                    managed_team = item.get("managed_team", "")
                     if league_name not in current_round_map or current_round_map[league_name] == 0:
-                        if matches_data and idx < len(matches_data):
-                            matches = matches_data[idx].get("matches", [])
-                            if matches:
-                                max_round = max((m.get("round", 0) for m in matches), default=0)
-                                if max_round > 0:
-                                    current_round_map[league_name] = max_round
-                                    print(f"    ℹ️ Jornada para '{league_name}' obtenida de matches: {max_round}")
+                        if matches_data:
+                            team_matches = find_data_for_team(matches_data, managed_team)
+                            if team_matches:
+                                matches = team_matches.get("matches", [])
+                                if matches:
+                                    max_round = max((m.get("round", 0) for m in matches), default=0)
+                                    if max_round > 0:
+                                        current_round_map[league_name] = max_round
+                                        print(f"    ℹ️ Jornada para '{league_name}' obtenida de matches: {max_round}")
                 
                 if current_round_map:
                     sync_tactics(conn, tactics_data, processed_leagues, user_id, current_round_map)
