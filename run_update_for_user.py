@@ -796,19 +796,19 @@ def ensure_matches_columns_exist(conn):
             cur.execute("ALTER TABLE matches ADD COLUMN referee_strictness VARCHAR(50);")
         conn.commit()
 
-def check_if_calendar_needed(conn, user_id):
-    """
-    Returns True if any active league for the user has not scraped the calendar yet.
-    """
-    ensure_calendar_column_exists(conn)
-    ensure_matches_columns_exist(conn) # Ensure matches schema is ready too
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT 1 FROM user_leagues 
-            WHERE user_id = %s AND is_active = TRUE AND calendar_scraped = FALSE 
-            LIMIT 1;
-        """, (user_id,))
-        return cur.fetchone() is not None
+# def check_if_calendar_needed(conn, user_id):
+#     """
+#     Returns True if any active league for the user has not scraped the calendar yet.
+#     """
+#     ensure_calendar_column_exists(conn)
+#     ensure_matches_columns_exist(conn) # Ensure matches schema is ready too
+#     with conn.cursor() as cur:
+#         cur.execute("""
+#             SELECT 1 FROM user_leagues 
+#             WHERE user_id = %s AND is_active = TRUE AND calendar_scraped = FALSE 
+#             LIMIT 1;
+#         """, (user_id,))
+#         return cur.fetchone() is not None
 
 def mark_calendar_as_scraped(conn, user_id, processed_leagues):
     """Mark synced leagues as calendar_scraped = True"""
@@ -879,7 +879,7 @@ def run_update_for_user(user_id):
     
     # 0. Determinar si necesitamos Calendario (Auto-detection)
     try:
-        needs_calendar = check_if_calendar_needed(conn, user_id)
+        needs_calendar = True #check_if_calendar_needed(conn, user_id)
         if needs_calendar:
             print("📅 DETECTADO: Ligas nuevas/pendientes. Se activará el escaneo de calendario.")
         else:
