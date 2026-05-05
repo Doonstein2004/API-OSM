@@ -9,8 +9,6 @@ from utils import handle_popups, safe_int, safe_navigate
 load_dotenv()
 
 # --- TABLA SELECTOR AMPLIADO ---
-# OSM usa 'table.table-sticky' en algunas vistas y simplemente 'table' en otras.
-# Definimos los posibles selectores en orden de prioridad.
 RESULTS_TABLE_SELECTORS = [
     "table.table-sticky",
     "#results-list table",
@@ -22,108 +20,63 @@ RESULTS_TABLE_SELECTORS = [
 def _navigate_to_league_tab_in_spa(page, tab_href: str, verify_selector: str, timeout_ms: int = 15000) -> bool:
     """
     Navega a una pestaña de la SPA de OSM usando el menú interno.
-    EVITA usar page.goto() directo que destruye el contexto de equipo activo.
-    
-    Estrategia:
-      1. Buscar el link del menú que apunte a tab_href (ej /League/Results)
-      2. Si existe: click → esperar selector
-      3. Si no: fallback a page.goto() con 3 reintentos y espera más larga
     """
     try:
-        # Intentar encontrar en el menú de navegación lateral/top
         nav_link = page.locator(f"a[href*='{tab_href}']").first
         if nav_link.is_visible(timeout=3000):
             nav_link.click()
-            # Esperar a que la ruta de la SPA cambie y el contenido aparezca
             try:
                 page.wait_for_url(f"**{tab_href}**", timeout=8000)
-            except:
-                pass
-            # Esperar al selector con múltiples opciones
+            except: pass
             for sel in RESULTS_TABLE_SELECTORS + [verify_selector]:
                 try:
                     page.wait_for_selector(sel, timeout=timeout_ms, state="visible")
                     print(f"  ✓ Navegación SPA OK (selector '{sel}')")
                     return True
-                except:
-                    continue
-            print("  ⚠️ Click en nav exitoso pero tabla no apareció. Probando fallback.")
+                except: continue
     except Exception as e:
         print(f"  ⚠️ Nav SPA falló ({e}). Usando fallback goto().")
 
-    # --- FALLBACK: goto con reintentos ---
     full_url = f"https://en.onlinesoccermanager.com{tab_href}"
     for attempt in range(3):
         try:
             page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(2)  # Dar tiempo al SPA para hidratarse
+            time.sleep(2)
             for sel in RESULTS_TABLE_SELECTORS + [verify_selector]:
                 try:
                     page.wait_for_selector(sel, timeout=12000, state="visible")
-                    print(f"  ✓ Fallback goto() OK (selector '{sel}' en intento {attempt+1})")
+                    print(f"  ✓ Fallback goto() OK (selector '{sel}')")
                     return True
-                except:
-                    continue
-            print(f"  ⚠️ Intento {attempt+1}/3: tabla no apareció, reintentando...")
+                except: continue
             page.reload(wait_until="domcontentloaded")
             time.sleep(2)
         except Exception as e:
-            print(f"  ⚠️ Error goto() intento {attempt+1}/3: {e}")
             time.sleep(3)
-
-    print(f"  ❌ Fallo definitivo navegando a {full_url}")
     return False
 
 def get_match_results(page, scrape_future_fixtures=False):
     """
-    Extrae los resultados. V4.1 FIXED - Corregida extracción de eventos, stats y ratings.
+    Extrae los resultados. V4.2 - Navegación condicional por jornadas y calendario completo.
     """
-    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V4.1 (FIXED) ---")
+    print("--- 🟢 EJECUTANDO SCRAPER MATCH RESULTS V4.2 ---")
     
     try:
         MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
-        RESULTS_URL = "https://en.onlinesoccermanager.com/League/Results"
-        
         all_leagues_matches = []
         NUM_SLOTS = 4
 
-        # Función auxiliar para convertir iconos a tipos de evento
-        # Función auxiliar para convertir iconos a tipos de evento
-        def resolve_event_type(html_content):
-            html = html_content.lower()
-            
-            # Prioridad a eventos específicos (Tarjetas, Lesiones, Cambios, Penales fallados)
-            if "yellowcard" in html or "icon-player-yellowcard" in html: return "yellow_card"
-            if "redcard" in html or "icon-player-redcard" in html: return "red_card"
-            if "injury" in html or "icon-player-injury" in html: return "injury"
-            if "substitution" in html or "icon-matchevent-sub" in html: return "substitution"
-            if "penaltymiss" in html or "icon-matchevent-penaltymiss" in html: return "penalty_miss"
-            
-            # Goles (Al final para evitar falsos positivos con substrings)
-            if "icon-matchevent-goal" in html or "icon-matchevent-penaltygoal" in html or "own-goal" in html: return "goal"
-            
-            # Fallback seguro para gol solo si no es ninguno de los anteriores
-            if "goal" in html and "kick" not in html: return "goal"
-            
-            return "other"
-
-        # --- LOOP PRINCIPAL ---
         for i in range(NUM_SLOTS):
             print(f"\n--- Analizando Resultados - Slot #{i + 1} ---")
-            
             if page.url != MAIN_DASHBOARD_URL:
                 page.goto(MAIN_DASHBOARD_URL)
             try:
                 page.wait_for_selector(".career-teamslot", timeout=20000)
             except: 
-                print("  ⚠️ Timeout en dashboard. Saltando.")
                 continue
                 
             handle_popups(page)
-
             slot = page.locator(".career-teamslot").nth(i)
             if slot.locator("h2.clubslot-main-title").count() == 0:
-                print(f"Slot #{i + 1} está vacío. Saltando.")
                 continue
 
             team_name = slot.locator("h2.clubslot-main-title").inner_text()
@@ -134,373 +87,224 @@ def get_match_results(page, scrape_future_fixtures=False):
             try:
                 page.wait_for_selector("#timers", timeout=45000)
             except:
-                print("  ⚠️ Timeout cargando equipo. Siguiente.")
                 continue
                 
             handle_popups(page)
             
             try:
-                print(f"  - Navegando a Resultados...")
-                tab_path = "/League/Fixtures" if scrape_future_fixtures else "/League/Results"
-                if not _navigate_to_league_tab_in_spa(page, tab_path, verify_selector="table.table-sticky"):
-                    print("  ❌ No se pudo cargar la tabla de resultados. Saltando.")
-                    continue
-                # Pequeña pausa extra para estabilización del DOM
-                time.sleep(1)
-                
-                # --- JORNADA ---
-                round_number = 0
-                try:
-                    header_span = page.locator("th.text-center span[data-bind*='weekNr']")
-                    if header_span.count() > 0:
-                        round_number = safe_int(header_span.inner_text())
-                except: pass
-                print(f"  - Jornada detectada: {round_number}")
-
-                # --- EXTRACT ROWS VIA JS (Solo para saber cuántas son y su estado básico) ---
-                # Usar selector amplio para compatibilidad con distintas vistas
-                match_rows_data = page.evaluate("""() => {
-                    const tableSelectors = ['table.table-sticky', '#results-list table', '#matches-list table', '.league-results table', 'table'];
-                    let tableEl = null;
-                    for (const sel of tableSelectors) {
-                        tableEl = document.querySelector(sel);
-                        if (tableEl) break;
-                    }
-                    const rows = tableEl ? Array.from(tableEl.querySelectorAll('tbody tr')) : [];
-                    let currentRound = 0;
-                    
-                    const extracted = [];
-                    for(let i=0; i<rows.length; i++){
-                        const r = rows[i];
-                        
-                        // Verificar si es un header de matchday (EJ: "Matchday 5" o "Jornada 5")
-                        const headerEl = r.querySelector('td[colspan] span') || r.querySelector('td span') || r;
-                        const txtFull = headerEl.innerText.trim();
-                        const matchdayRegex = /(?:matchday|jornada|round|week|rodada|rnd)\\s*(\\d+)/i;
-                        const m = txtFull.match(matchdayRegex);
-                        if (m) {
-                            currentRound = parseInt(m[1], 10);
-                            continue; // Saltar fila de encabezado
-                        }
-                        
-                        const home = r.querySelector('.td-home .font-sm');
-                        const away = r.querySelector('.td-away .font-sm');
-                        
-                        if(!home || !away) continue; // Si no hay equipos validos
-                        
-                        const isClickable = r.classList.contains('clickable') || r.getAttribute('onclick');
-                        const scoreEl = r.querySelector('.match-score span') || r.querySelector('span[data-bind*="score"]');
-                        
-                        let isPlayed = false;
-                        let hGoals = 0, aGoals = 0;
-                        
-                        if (scoreEl) {
-                            const txt = scoreEl.innerText.trim();
-                            if(txt.includes('-') && !txt.includes(':')) {
-                                const parts = txt.split('-');
-                                if(parts.length === 2) {
-                                    isPlayed = true;
-                                    hGoals = parseInt(parts[0]);
-                                    aGoals = parseInt(parts[1]);
-                                }
-                            }
-                        }
-
-                        // Managers
-                        const hMgrEl = r.querySelector('.td-home .text-secondary');
-                        const aMgrEl = r.querySelector('.td-away .text-secondary');
-
-                        extracted.push({
-                            idx: i,
-                            round: currentRound,
-                            is_played: isPlayed,
-                            home_team: home.innerText.trim(),
-                            away_team: away.innerText.trim(),
-                            home_manager: hMgrEl ? hMgrEl.innerText.trim() : "CPU",
-                            away_manager: aMgrEl ? aMgrEl.innerText.trim() : "CPU",
-                            home_goals: hGoals,
-                            away_goals: aGoals
-                        });
-                    }
-                    return extracted;
-                }""")
-                
-                print(f"  - Encontrados {len(match_rows_data)} partidos en lista.")
+                tabs_to_visit = ["/League/Results"]
+                if scrape_future_fixtures:
+                    tabs_to_visit.append("/League/Fixtures")
                 
                 league_matches = []
+                seen_matches = set()
 
-                for m_idx, m_info in enumerate(match_rows_data):
-                    # Filtrar futuros si no se piden
-                    if not scrape_future_fixtures and not m_info['is_played']:
+                for tab_path in tabs_to_visit:
+                    print(f"  - Navegando a {tab_path}...")
+                    if not _navigate_to_league_tab_in_spa(page, tab_path, verify_selector="table.table-sticky"):
                         continue
+                    
+                    time.sleep(1)
 
-                    # Objeto base
-                    match_obj = {
-                        "round": m_info.get("round") if m_info.get("round") > 0 else round_number,
-                        "home_team": m_info['home_team'],
-                        "home_manager": m_info['home_manager'],
-                        "away_team": m_info['away_team'],
-                        "away_manager": m_info['away_manager'],
-                        "home_goals": m_info['home_goals'],
-                        "away_goals": m_info['away_goals'],
-                        "is_played": m_info['is_played'],
-                        "referee": "",
-                        "referee_strictness": "",
-                        "events": [],
-                        "statistics": {},
-                        "ratings": {"home": [], "away": []}
-                    }
-
-                    if m_info['is_played']:
-                        print(f"    🔍 Detalles para {m_info['home_team']} vs {m_info['away_team']}...")
-                        
-                        # --- CLICK ---
-                        # Usar el selector más amplio posible para la tabla
-                        table_sel = "table.table-sticky"
-                        for _sel in RESULTS_TABLE_SELECTORS:
-                            if page.locator(_sel).count() > 0:
-                                table_sel = _sel
-                                break
-                        row_locator = page.locator(f"{table_sel} tbody tr").nth(m_info['idx'])
-                        
-                        try:
-                            # Click con retry
-                            row_locator.click(position={"x": 5, "y": 5}, force=True)
-                            
-                            # Esperar modal
+                    is_fixtures = "/Fixtures" in tab_path
+                    if is_fixtures and scrape_future_fixtures:
+                        print("    📂 Iniciando escaneo completo de calendario...")
+                        prev_btn = page.locator(".fixtures-matchday-nav-prev, .btn-prev").first
+                        while prev_btn.count() > 0 and prev_btn.is_visible(timeout=500):
                             try:
-                                page.wait_for_selector(".modal-content table.table-match-events", state="visible", timeout=3500)
-                            except:
-                                # A veces no hay eventos (0-0), esperamos al menos el contenedor o stats
-                                page.wait_for_selector(".modal-content", state="visible", timeout=3000)
+                                prev_btn.click()
+                                time.sleep(0.3)
+                            except: break
+                        time.sleep(0.5)
 
-                            # Pequeña espera de estabilización
-                            time.sleep(0.5)
-
-                            # --- EXTRACCIÓN DE DETALLES MEJORADA ---
-                            details_data = page.evaluate(r"""() => {
-                                const modal = document.querySelector('.modal-content');
-                                if (!modal) return null;
-
-                                // --- REFEREE ---
-                                let refName = "";
-                                let strictness = "Unknown";
-                                const refDiv = modal.querySelector('#match-details-referee');
-                                if (refDiv) {
-                                    const spanName = refDiv.querySelector('span[data-bind*="text: name"]');
-                                    if(spanName) refName = spanName.innerText.trim();
-                                    
-                                    // Strictness por clase de icono - Devuelve Texto en lugar de número
-                                    const icon = refDiv.querySelector('span.icon-referee');
-                                    if(icon) {
-                                        if(icon.classList.contains('verylenient')) strictness = 'Very Lenient';
-                                        else if(icon.classList.contains('lenient')) strictness = 'Lenient';
-                                        else if(icon.classList.contains('average')) strictness = 'Average';
-                                        else if(icon.classList.contains('strict')) strictness = 'Strict';
-                                        else if(icon.classList.contains('verystrict')) strictness = 'Very Strict';
+                    while True:
+                        round_number = 0
+                        try:
+                            header_span = page.locator("th.text-center span[data-bind*='weekNr'], .matchday-title").first
+                            if header_span.count() > 0:
+                                txt = header_span.inner_text()
+                                round_number = safe_int(re.search(r'(\d+)', txt).group(1)) if re.search(r'(\d+)', txt) else 0
+                        except: pass
+                        
+                        match_rows_data = page.evaluate("""() => {
+                            const tableSelectors = ['table.table-sticky', '#results-list table', '#matches-list table', '.league-results table', 'table'];
+                            let tableEl = null;
+                            for (const sel of tableSelectors) {
+                                tableEl = document.querySelector(sel);
+                                if (tableEl) break;
+                            }
+                            const rows = tableEl ? Array.from(tableEl.querySelectorAll('tbody tr')) : [];
+                            let currentRound = 0;
+                            const extracted = [];
+                            for(let i=0; i<rows.length; i++){
+                                const r = rows[i];
+                                const headerEl = r.querySelector('td[colspan] span') || r.querySelector('td span') || r;
+                                const txtFull = headerEl.innerText.trim();
+                                const matchdayRegex = /(?:matchday|jornada|round|week|rodada|rnd)\\s*(\\d+)/i;
+                                const m = txtFull.match(matchdayRegex);
+                                if (m) {
+                                    currentRound = parseInt(m[1], 10);
+                                    continue;
+                                }
+                                const home = r.querySelector('.td-home .font-sm'), away = r.querySelector('.td-away .font-sm');
+                                if(!home || !away) continue;
+                                const scoreEl = r.querySelector('.match-score span') || r.querySelector('span[data-bind*="score"]');
+                                let isPlayed = false, hGoals = 0, aGoals = 0;
+                                if (scoreEl) {
+                                    const txt = scoreEl.innerText.trim();
+                                    if(txt.includes('-') && !txt.includes(':')) {
+                                        const parts = txt.split('-');
+                                        if(parts.length === 2) { isPlayed = true; hGoals = parseInt(parts[0]); aGoals = parseInt(parts[1]); }
                                     }
                                 }
+                                const hMgrEl = r.querySelector('.td-home .text-secondary'), aMgrEl = r.querySelector('.td-away .text-secondary');
+                                extracted.push({
+                                    idx: i, round: currentRound, is_played: isPlayed,
+                                    home_team: home.innerText.trim(), away_team: away.innerText.trim(),
+                                    home_manager: hMgrEl ? hMgrEl.innerText.trim() : "CPU",
+                                    away_manager: aMgrEl ? aMgrEl.innerText.trim() : "CPU",
+                                    home_goals: hGoals, away_goals: aGoals
+                                });
+                            }
+                            return extracted;
+                        }""")
+                        
+                        print(f"    - Jornada {round_number}: {len(match_rows_data)} partidos.")
 
-                                // --- EVENTS --- (Ya actualizado anteriormente)
-                                const events = [];
-                                const rows = Array.from(modal.querySelectorAll('table.table-match-events tbody tr'));
-                                rows.forEach(r => {
-                                    const minHomeEl = r.querySelector('.td-event-home-minute span');
-                                    const minAwayEl = r.querySelector('.td-event-away-minute span');
-                                    const minEl = minHomeEl || minAwayEl;
-                                    if(!minEl) return;
+                        for m_info in match_rows_data:
+                            m_round = m_info.get("round") if m_info.get("round") > 0 else round_number
+                            m_key = (m_info['home_team'], m_info['away_team'], m_round)
+                            if m_key in seen_matches: continue
+                            seen_matches.add(m_key)
+
+                            if not scrape_future_fixtures and not m_info['is_played']: continue
+
+                            match_obj = {
+                                "round": m_round, "home_team": m_info['home_team'], "home_manager": m_info['home_manager'],
+                                "away_team": m_info['away_team'], "away_manager": m_info['away_manager'],
+                                "home_goals": m_info['home_goals'], "away_goals": m_info['away_goals'],
+                                "is_played": m_info['is_played'], "referee": "", "referee_strictness": "",
+                                "events": [], "statistics": {}, "ratings": {"home": [], "away": []}
+                            }
+
+                            if m_info['is_played']:
+                                print(f"    🔍 Detalles: {m_info['home_team']} vs {m_info['away_team']}")
+                                table_sel = "table.table-sticky"
+                                for _sel in RESULTS_TABLE_SELECTORS:
+                                    if page.locator(_sel).count() > 0:
+                                        table_sel = _sel
+                                        break
+                                row_locator = page.locator(f"{table_sel} tbody tr").nth(m_info['idx'])
+                                try:
+                                    # Click con retry y verificación de modal
+                                    row_locator.click(position={"x": 5, "y": 5}, force=True)
                                     
-                                    const minute = parseInt(minEl.innerText.trim()) || 0;
-                                    
-                                    const homeNameDiv = r.querySelector('.td-event-home-names > div');
-                                    const side = (homeNameDiv && homeNameDiv.children.length > 0) ? 'home' : 'away';
-                                    
-                                    let eventType = "other";
-                                    const iconSpan = r.querySelector('.td-event-home-icon span, .td-event-away-icon span');
-                                    
-                                    if (iconSpan) {
-                                        const cls = iconSpan.className.toLowerCase();
-                                        if (cls.includes('yellowcard')) eventType = 'yellow_card';
-                                        else if (cls.includes('redcard')) eventType = 'red_card';
-                                        else if (cls.includes('injury')) eventType = 'injury';
-                                        else if (cls.includes('sub')) eventType = 'substitution';
-                                        else if (cls.includes('penaltymiss')) eventType = 'penalty_miss';
-                                        else if (cls.includes('goal')) eventType = 'goal';
-                                    }
-                                    
-                                    let player = "";
-                                    let detail = "";
-                                    const namesCell = r.querySelector(`.td-event-${side}-names`);
-                                    if(namesCell) {
-                                        const boldEl = namesCell.querySelector('.semi-bold');
-                                        if(boldEl) player = boldEl.innerText.trim();
+                                    # Esperar a que el modal aparezca y TENGA CONTENIDO
+                                    # Esperamos al referee o a la tabla de eventos/stats
+                                    try:
+                                        page.wait_for_selector(".modal-content #match-details-referee, .modal-content .table-match-events, .modal-content #table-match-statistics", 
+                                                              state="visible", timeout=5000)
+                                        # Un pequeño respiro extra para que el AJAX termine de poblar todo
+                                        time.sleep(1.2)
+                                    except:
+                                        print("      ⚠️ El contenido del modal tardó demasiado en aparecer.")
+
+                                    details_data = page.evaluate(r"""() => {
+                                        const modal = document.querySelector('.modal-content');
+                                        if (!modal) return null;
                                         
-                                        const allDivs = namesCell.querySelectorAll('div');
-                                        allDivs.forEach(d => {
-                                            if(!d.classList.contains('semi-bold') && d.innerText.trim()) {
-                                                detail = d.innerText.trim();
+                                        // Reintentar encontrar elementos si están vacíos (pequeño loop interno)
+                                        let refName = "", strictness = "Unknown";
+                                        const refDiv = modal.querySelector('#match-details-referee');
+                                        if (refDiv) {
+                                            const spanName = refDiv.querySelector('span[data-bind*="text: name"]');
+                                            if(spanName) refName = spanName.innerText.trim();
+                                            const icon = refDiv.querySelector('span.icon-referee');
+                                            if(icon) {
+                                                if(icon.classList.contains('verylenient')) strictness = 'Very Lenient';
+                                                else if(icon.classList.contains('lenient')) strictness = 'Lenient';
+                                                else if(icon.classList.contains('average')) strictness = 'Average';
+                                                else if(icon.classList.contains('strict')) strictness = 'Strict';
+                                                else if(icon.classList.contains('verystrict')) strictness = 'Very Strict';
+                                            }
+                                        }
+                                        const events = [];
+                                        Array.from(modal.querySelectorAll('table.table-match-events tbody tr')).forEach(r => {
+                                            const minEl = r.querySelector('.td-event-home-minute span') || r.querySelector('.td-event-away-minute span');
+                                            if(!minEl) return;
+                                            const side = (r.querySelector('.td-event-home-names > div')?.children.length > 0) ? 'home' : 'away';
+                                            let type = "other";
+                                            const icon = r.querySelector('.td-event-home-icon span, .td-event-away-icon span');
+                                            if (icon) {
+                                                const cls = icon.className.toLowerCase();
+                                                if (cls.includes('yellowcard')) type = 'yellow_card';
+                                                else if (cls.includes('redcard')) type = 'red_card';
+                                                else if (cls.includes('injury')) type = 'injury';
+                                                else if (cls.includes('sub')) type = 'substitution';
+                                                else if (cls.includes('penaltymiss')) type = 'penalty_miss';
+                                                else if (cls.includes('goal')) type = 'goal';
+                                            }
+                                            const cell = r.querySelector(`.td-event-${side}-names`);
+                                            const player = cell?.querySelector('.semi-bold')?.innerText.trim() || "";
+                                            const detail = Array.from(cell?.querySelectorAll('div') || []).find(d => !d.classList.contains('semi-bold'))?.innerText.trim() || "";
+                                            events.push({ minute: parseInt(minEl.innerText) || 0, side, type, player, detail });
+                                        });
+                                        const stats = {};
+                                        Array.from(modal.querySelectorAll('#table-match-statistics tbody tr')).forEach(r => {
+                                            const title = r.querySelector('.td-match-stat-title')?.innerText.trim();
+                                            if(title) {
+                                                const hEl = r.querySelector('.td-match-stat-home'), aEl = r.querySelector('.td-match-stat-away');
+                                                let hVal = hEl?.innerText.trim() || "0", aVal = aEl?.innerText.trim() || "0";
+                                                if (title !== 'Formation') { hVal = hVal.replace(/[^\d]/g, ''); aVal = aVal.replace(/[^\d]/g, ''); }
+                                                if(title === 'Cards') {
+                                                    const hY = hEl.querySelector('.icon-player-yellowcard')?.innerText.trim() || "0";
+                                                    const hR = hEl.querySelector('.icon-player-redcard')?.innerText.trim() || "0";
+                                                    const aY = aEl.querySelector('.icon-player-yellowcard')?.innerText.trim() || "0";
+                                                    const aR = aEl.querySelector('.icon-player-redcard')?.innerText.trim() || "0";
+                                                    hVal = `${hY} ${hR}`; aVal = `${aY} ${aR}`;
+                                                }
+                                                stats[title] = { home: hVal, away: aVal };
                                             }
                                         });
-                                    }
+                                        const ratings = { home: [], away: [] };
+                                        const exRat = (tbl, arr) => tbl?.querySelectorAll('tbody tr').forEach(tr => {
+                                            const n = tr.querySelector('.td-playergrade-name .semi-bold')?.innerText.trim();
+                                            const g = tr.querySelector('.playergrade span')?.innerText.trim();
+                                            if(n && g) arr.push({ player: n, grade: g === '-' ? "0" : g });
+                                        });
+                                        exRat(modal.querySelector('.table-playergrades-home table'), ratings.home);
+                                        exRat(modal.querySelector('.table-playergrades-away table'), ratings.away);
+                                        return { referee: refName, strictness, events, stats, ratings };
+                                    }""")
+                                    if details_data:
+                                        match_obj.update({
+                                            'referee': details_data['referee'], 'referee_strictness': details_data['strictness'],
+                                            'statistics': details_data['stats'], 'ratings': details_data['ratings'],
+                                            'events': details_data['events']
+                                        })
+                                except: pass
+                                try:
+                                    close_btn = page.locator("button.close, [data-dismiss='modal']").first
+                                    if close_btn.count() > 0 and close_btn.is_visible(timeout=500): close_btn.click()
+                                    else: page.keyboard.press("Escape")
+                                    page.wait_for_selector(".modal-content", state="hidden", timeout=1500)
+                                except:
+                                    page.evaluate("() => { document.querySelectorAll('.modal, .modal-backdrop').forEach(el => el.remove()); document.body.classList.remove('modal-open'); }")
+                                    time.sleep(0.2)
+                            league_matches.append(match_obj)
 
-                                    events.push({
-                                        minute: minute,
-                                        side: side,
-                                        type: eventType,
-                                        player: player,
-                                        detail: detail
-                                    });
-                                });
+                        if is_fixtures and scrape_future_fixtures:
+                            next_btn = page.locator(".fixtures-matchday-nav-next, .btn-next").first
+                            if next_btn.count() > 0 and next_btn.is_visible(timeout=1000):
+                                try: next_btn.click(); time.sleep(0.5)
+                                except: break
+                            else: break
+                        else: break
 
-                                // --- STATS ---
-                                const stats = {};
-                                const statRows = Array.from(modal.querySelectorAll('#table-match-statistics tbody tr'));
-                                statRows.forEach(r => {
-                                    const titleEl = r.querySelector('.td-match-stat-title');
-                                    if(titleEl) {
-                                        // Usamos TitleCase o snake_case según preferencia? 
-                                        // El usuario mostró "Cards" (TitleCase) en el JSON "Correcto". Ajustamos.
-                                        let key = titleEl.innerText.trim(); 
-                                        // key = key.toLowerCase().replace(/\s+/g, '_'); // Anterior
-                                        
-                                        const hEl = r.querySelector('.td-match-stat-home');
-                                        const aEl = r.querySelector('.td-match-stat-away');
-                                        
-                                        let hVal = hEl ? hEl.innerText.trim() : "0";
-                                        let aVal = aEl ? aEl.innerText.trim() : "0";
-                                        
-                                        // Console debug (puedes verlo en las DevTools del navegador si hace falta)
-                                        // console.log(`[DEBUG] Stat ${key} -> Home Raw: "${hVal}" | Away Raw: "${aVal}"`);
-
-                                        if (key === 'Formation') {
-                                            // Preservar las letras "A" o "B".
-                                            hVal = hVal.replace(/\s+/g, ' ').trim();
-                                            aVal = aVal.replace(/\s+/g, ' ').trim();
-                                        } else {
-                                            hVal = hVal.replace('%', '').replace(/[^\d]/g, '');
-                                            aVal = aVal.replace('%', '').replace(/[^\d]/g, '');
-                                        }
-                                        
-                                        if(key === 'Cards') {
-                                            const hYellow = hEl.querySelector('.icon-player-yellowcard');
-                                            const hRed = hEl.querySelector('.icon-player-redcard');
-                                            const aYellow = aEl.querySelector('.icon-player-yellowcard');
-                                            const aRed = aEl.querySelector('.icon-player-redcard');
-                                            
-                                            // Formato "Yellow Red" string para coincidir con "2 0" del JSON correcto?
-                                            // En el JSON correcto: "Cards": { "away": "0 1", "home": "2 0" } -> Parece "Yellow Red"
-                                            const hY = hYellow ? (parseInt(hYellow.innerText.trim()) || 0) : 0;
-                                            const hR = hRed ? (parseInt(hRed.innerText.trim()) || 0) : 0;
-                                            const aY = aYellow ? (parseInt(aYellow.innerText.trim()) || 0) : 0;
-                                            const aR = aRed ? (parseInt(aRed.innerText.trim()) || 0) : 0;
-                                            
-                                            // Sobrescribimos para devolver strings "Y R" si queremos match exacto
-                                            hVal = `${hY} ${hR}`;
-                                            aVal = `${aY} ${aR}`;
-                                            
-                                            // OJO: El código anterior devolvía objeto {white:.., red:..}.
-                                            // El JSON correcto muestra "Cards": {"away": "0 1", "home": "2 0"}
-                                            // El JSON incorrecto muestra "cards": {"away": {red:0, yellow:2}...}
-                                            // Si el Front usa el JSON Correcto, debo cambiar esto.
-                                            // Cambiamos a objeto simple string style "Y R"
-                                        }
-                                        
-                                        stats[key] = { home: hVal, away: aVal };
-                                    }
-                                });
-
-                                // --- RATINGS ---
-                                const ratings = { home: [], away: [] };
-                                
-                                const extractRatings = (table, targetArray) => {
-                                    if(!table) return;
-                                    const rows = table.querySelectorAll('tbody tr');
-                                    rows.forEach(tr => {
-                                        const nameEl = tr.querySelector('.td-playergrade-name .semi-bold');
-                                        const gradeEl = tr.querySelector('.playergrade span');
-                                        if(nameEl && gradeEl) {
-                                            const gradeText = gradeEl.innerText.trim();
-                                            targetArray.push({
-                                                player: nameEl.innerText.trim(), // CAMBIO: 'name' -> 'player'
-                                                grade: gradeText === '-' ? "0" : gradeText // CAMBIO: String grade
-                                            });
-                                        }
-                                    });
-                                };
-
-                                extractRatings(modal.querySelector('.table-playergrades-home table'), ratings.home);
-                                extractRatings(modal.querySelector('.table-playergrades-away table'), ratings.away);
-
-                                return {
-                                    referee: refName,
-                                    strictness: strictness,
-                                    events: events,
-                                    stats: stats,
-                                    ratings: ratings
-                                };
-                            }""")
-
-                            if details_data:
-                                match_obj['referee'] = details_data['referee']
-                                match_obj['referee_strictness'] = details_data['strictness']
-                                match_obj['statistics'] = details_data['stats']
-                                match_obj['ratings'] = details_data['ratings']
-                                
-                                # Procesar eventos en Python
-                                for raw_ev in details_data['events']:
-                                    match_obj['events'].append({
-                                        "minute": raw_ev['minute'],
-                                        "type": raw_ev['type'],
-                                        "side": raw_ev['side'],
-                                        "player": raw_ev['player'] or raw_ev['detail'], # Fallback
-                                        "detail": raw_ev['detail']
-                                    })
-                                
-                                print(f"      ✓ Eventos: {len(match_obj['events'])}, Stats: {len(match_obj['statistics'])}, Ref: {match_obj['referee']}")
-                                print(f"      ✓ Ratings - Home: {len(match_obj['ratings']['home'])}, Away: {len(match_obj['ratings']['away'])}")
-                            else:
-                                print("      ⚠️ No se pudieron extraer datos del DOM del modal.")
-
-                        except Exception as e:
-                            print(f"      ⚠️ Error procesando modal: {e}")
-
-                        # --- CERRAR MODAL (Hardcore Mode) ---
-                        try:
-                            # Intentar click en botón de cierre
-                            close_btn = page.locator("button.close, [data-dismiss='modal']").first
-                            if close_btn.is_visible(timeout=500):
-                                close_btn.click(timeout=1000)
-                            else:
-                                page.keyboard.press("Escape")
-                        except:
-                            page.keyboard.press("Escape")
-                        
-                        # Esperar a que se vaya
-                        try:
-                            page.wait_for_selector(".modal-content", state="hidden", timeout=1500)
-                        except:
-                            # Si sigue ahí, JS Nuke
-                            page.evaluate("""() => {
-                                const modals = document.querySelectorAll('.modal, .modal-backdrop');
-                                modals.forEach(el => el.remove());
-                                document.body.classList.remove('modal-open');
-                                document.body.style.paddingRight = '';
-                            }""")
-                            time.sleep(0.2)
-
-                    league_matches.append(match_obj)
-
-                all_leagues_matches.append({
-                    "league_name": league_name,
-                    "matches": league_matches
-                })
-
+                all_leagues_matches.append({"league_name": league_name, "team_name": team_name, "matches": league_matches})
             except Exception as e:
                 print(f"  ❌ Error en slot {i}: {e}")
-                continue
-
         return all_leagues_matches
-
     except Exception as e:
         print(f"❌ Error crítico en scraper: {e}")
         return []
