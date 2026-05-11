@@ -1,7 +1,16 @@
-# run_update_from_user.py
-import json
 import sys
+import io
 import os
+
+# --- Forzar codificación UTF-8 para evitar errores con emojis en Windows ---
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
+    except:
+        pass
+
+import json
 import psycopg2
 import psycopg2.extras
 import time
@@ -9,6 +18,7 @@ from collections import defaultdict
 from datetime import datetime
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+
 
 # --- Módulos Locales ---
 from utils import login_to_osm, InvalidCredentialsError, login_with_session_cache

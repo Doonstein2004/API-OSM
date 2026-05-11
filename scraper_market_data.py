@@ -44,15 +44,21 @@ def get_market_data(page: Page):
                 page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded")
             
             try:
-                page.wait_for_selector(".career-teamslot", timeout=10000)
+                handle_popups(page)
+                page.wait_for_selector(".career-teamslot", timeout=20000)
             except: break
 
             slot = page.locator(".career-teamslot").nth(i)
-            if slot.locator("h2.clubslot-main-title").count() == 0: continue
+            
+            from utils import get_slot_info
+            team_name, league_name = get_slot_info(slot)
+            
+            if not team_name:
+                print(f"Slot #{i + 1} no es procesable (Searching/Unavailable/Empty). Saltando.")
+                continue
+                
+            print(f"Procesando: {team_name} en {league_name}")
 
-            team_name = slot.locator("h2.clubslot-main-title").inner_text()
-            league_name = slot.locator("h4.display-name").inner_text()
-            print(f"Procesando: {team_name}")
             
             slot.click()
             page.wait_for_selector("#timers", timeout=60000)

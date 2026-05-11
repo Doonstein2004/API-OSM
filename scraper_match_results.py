@@ -70,18 +70,22 @@ def get_match_results(page, scrape_future_fixtures=False):
             if page.url != MAIN_DASHBOARD_URL:
                 page.goto(MAIN_DASHBOARD_URL)
             try:
+                handle_popups(page)
                 page.wait_for_selector(".career-teamslot", timeout=20000)
             except: 
                 continue
                 
-            handle_popups(page)
             slot = page.locator(".career-teamslot").nth(i)
-            if slot.locator("h2.clubslot-main-title").count() == 0:
+            
+            from utils import get_slot_info
+            team_name, league_name = get_slot_info(slot)
+            
+            if not team_name:
+                print(f"Slot #{i + 1} no es procesable (Searching/Unavailable/Empty). Saltando.")
                 continue
 
-            team_name = slot.locator("h2.clubslot-main-title").inner_text()
-            league_name = slot.locator("h4.display-name").inner_text()
             print(f"Procesando equipo: {team_name} en la liga {league_name}")
+
 
             slot.click()
             try:

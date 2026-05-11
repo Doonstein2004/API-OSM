@@ -31,23 +31,23 @@ def get_league_data(page):
                 page.goto(MAIN_DASHBOARD_URL)
             
             try:
+                handle_popups(page)
                 page.wait_for_selector(".career-teamslot", timeout=35000)
             except:
                 print("No se encontraron slots de carrera. Posible error de carga.")
                 break
 
-            handle_popups(page)
-
             slot = page.locator(".career-teamslot").nth(i)
 
-            # Verificar si el slot está vacío
-            if slot.locator("h2.clubslot-main-title").count() == 0:
-                print(f"Slot #{i + 1} está vacío. Saltando.")
+            from utils import get_slot_info
+            team_name, league_name = get_slot_info(slot)
+            
+            if not team_name:
+                print(f"Slot #{i + 1} no es procesable (Searching/Unavailable/Empty). Saltando.")
                 continue
 
-            team_name = slot.locator("h2.clubslot-main-title").inner_text()
-            league_name = slot.locator("h4.display-name").inner_text()
             print(f"Procesando equipo: {team_name} en la liga {league_name}")
+
 
             # Hacer clic en el slot para activar ese equipo
             slot.click()

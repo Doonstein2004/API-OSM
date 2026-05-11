@@ -9,9 +9,10 @@ class InvalidCredentialsError(Exception):
 
 def handle_popups(page: Page):
     """
-    Versión v4.2: Cierra modales agresivos, incluyendo el aviso de Password Login (que es un div, no un button).
+    Versión v4.3: Cierra modales agresivos, incluyendo el aviso de Password Login y modales de "Searching".
     """
     try:
+        # 1. Selectores de botones de "Entendido" / "Continuar"
         understand_selectors = [
             "button:has-text('I understand')",
             "div.btn-new:has-text('I understand')",
@@ -23,25 +24,29 @@ def handle_popups(page: Page):
             "button:has-text('Skip')",
             "button:has-text('Saltar')",
             "button:has-text('View later')",
-            "button:has-text('Ver más tarde')"
+            "button:has-text('Ver más tarde')",
+            "button:has-text('Accept')",
+            "button:has-text('Aceptar')"
         ]
         for sel in understand_selectors:
             try:
                 loc = page.locator(sel).first
-                if loc.is_visible(timeout=500):
+                if loc.is_visible(timeout=300):
                     loc.click(force=True)
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(300)
             except:
                 pass
     except:
         pass
 
+    # 2. Inyección de CSS para ocultar elementos molestos
     try:
         page.add_style_tag(content="""
             #preloader-image, .modal-backdrop, #genericModalContainer, 
             .social-login-modal, #social-login-container, .facebook-login-button, 
             iframe[src*="facebook"], #manager-social-login,
-            #skillRatingUpdate-modal-content, .tier-up-title, .shield-animation-container { 
+            #skillRatingUpdate-modal-content, .tier-up-title, .shield-animation-container,
+            .modal-dialog .close-button-container { 
                 display: none !important; 
                 visibility: hidden !important; 
                 pointer-events: none !important; 
@@ -50,10 +55,11 @@ def handle_popups(page: Page):
     except:
         pass
     
+    # 3. Limpieza de modales vía JS
     try:
         page.evaluate("""
             document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
-                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss='modal'], .close-button-container button');
+                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss="modal"], .close-button-container button');
                 if (closeBtn) closeBtn.click();
             });
             document.querySelectorAll('#preloader-image, .modal-backdrop').forEach(el => el.remove());
@@ -69,6 +75,7 @@ def handle_popups(page: Page):
     except:
         pass
     
+    # 4. Tecla Escape como último recurso
     try:
         modal_visible = page.locator(".modal.in, .modal.show")
         if modal_visible.count() > 0:
@@ -76,6 +83,59 @@ def handle_popups(page: Page):
             time.sleep(0.2)
     except:
         pass
+
+def get_slot_info(slot_locator):
+    """
+    Extrae información de un slot de carrera de forma segura.
+    Maneja múltiples títulos (Searching, Unavailable) y evita Strict Mode Violations.
+    
+    Returns:
+        tuple: (team_name, league_name) o (None, None) si el slot es inválido.
+    """
+    try:
+        # Buscar títulos posibles
+        titles = slot_locator.locator("h2.clubslot-main-title")
+        count = titles.count()
+        
+        if count == 0:
+            return None, None
+            
+        team_name = ""
+        is_searching = False
+        is_unavailable = False
+        
+        for i in range(count):
+            txt = titles.nth(i).inner_text().strip()
+            if not txt: continue
+            
+            if "Searching" in txt:
+                is_searching = True
+            elif "unavailable" in txt.lower():
+                is_unavailable = True
+            else:
+                # Si no es un mensaje de estado, asumimos que es el nombre del equipo
+                # Priorizamos el que tiene el data-bind de teamPartial si hay varios
+                db_attr = titles.nth(i).get_attribute("data-bind") or ""
+                if "teamPartial" in db_attr:
+                    team_name = txt
+                    break
+                elif not team_name:
+                    team_name = txt
+        
+        if is_searching or is_unavailable or not team_name:
+            state = "Searching" if is_searching else ("Unavailable" if is_unavailable else "Empty")
+            print(f"    ⚠️ Slot omitido: {state}")
+            return None, None
+            
+        league_loc = slot_locator.locator("h4.display-name")
+        league_name = league_loc.first.inner_text().strip() if league_loc.count() > 0 else "Unknown"
+        
+        return team_name, league_name
+        
+    except Exception as e:
+        print(f"    ⚠️ Error extrayendo info del slot: {e}")
+        return None, None
+
     
 def safe_navigate(page: Page, url: str, verify_selector: str = None, max_retries=3):
     """

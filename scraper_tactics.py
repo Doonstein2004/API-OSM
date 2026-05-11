@@ -53,6 +53,7 @@ def get_tactics_data(page: Page):
 
             # === VERIFICAR SLOT ===
             try:
+                handle_popups(page)
                 slots = page.locator(".career-teamslot")
                 if slots.count() <= i:
                     print(f"Slot #{i + 1} no existe. Terminando.")
@@ -60,18 +61,19 @@ def get_tactics_data(page: Page):
                     
                 slot = slots.nth(i)
                 
-                title_locator = slot.locator("h2.clubslot-main-title")
-                if title_locator.count() == 0:
-                    print(f"Slot #{i + 1} está vacío. Saltando.")
+                from utils import get_slot_info
+                team_name, league_name = get_slot_info(slot)
+                
+                if not team_name:
+                    print(f"Slot #{i + 1} no es procesable (Searching/Unavailable/Empty). Saltando.")
                     continue
                 
-                team_name = title_locator.inner_text()
-                league_name = slot.locator("h4.display-name").inner_text()
                 print(f"Procesando: {team_name} en {league_name}")
                 
             except Exception as slot_error:
                 print(f"  ⚠️ Error verificando slot {i+1}: {slot_error}")
                 continue
+
 
             # === HACER CLICK EN EL SLOT CON REINTENTOS ===
             click_success = False
