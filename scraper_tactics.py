@@ -81,7 +81,7 @@ def get_tactics_data(page: Page):
                 try:
                     handle_popups(page)
                     slot = page.locator(".career-teamslot").nth(i)
-                    slot.click(timeout=15000)
+                    slot.click(timeout=15000, force=True)
                     page.wait_for_selector("#timers", timeout=45000)
                     handle_popups(page)
                     click_success = True

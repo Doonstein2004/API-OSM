@@ -50,7 +50,7 @@ def get_league_data(page):
 
 
             # Hacer clic en el slot para activar ese equipo
-            slot.click()
+            slot.click(force=True)
             page.wait_for_selector("#timers", timeout=45000)
             handle_popups(page)
             

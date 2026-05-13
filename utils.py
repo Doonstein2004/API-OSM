@@ -67,17 +67,37 @@ def handle_popups(page: Page):
     except:
         pass
     
-    # 3. Limpieza de modales vía JS
+    # 3. Limpieza de modales vía JS y FORZADO DE VISIBILIDAD RADICAL
     try:
         page.evaluate("""
-            document.querySelectorAll('.modal.in, .modal.show, .modal-backdrop').forEach(el => {
-                el.classList.remove('in', 'show');
+            // 1. Eliminar modales y backdrops
+            document.querySelectorAll('.modal.in, .modal.show, .modal-backdrop, #preloader-image, .loading-overlay, #onetrust-banner-sdk').forEach(el => {
                 el.style.display = 'none';
                 el.remove();
             });
+            
+            // 2. Desbloquear el cuerpo
             document.body.classList.remove('modal-open');
-            // Forzar que el scroll funcione
             document.body.style.overflow = 'auto';
+            document.body.style.pointerEvents = 'auto';
+
+            // 3. DESBLOQUEO RADICAL DE SLOTS (Unhide ancestors)
+            document.querySelectorAll('.career-teamslot').forEach(slot => {
+                let curr = slot;
+                while (curr && curr !== document.body) {
+                    const style = getComputedStyle(curr);
+                    if (style.display === 'none') {
+                        curr.style.setProperty('display', 'block', 'important');
+                    }
+                    if (style.visibility === 'hidden') {
+                        curr.style.setProperty('visibility', 'visible', 'important');
+                    }
+                    if (parseFloat(style.opacity) === 0) {
+                        curr.style.setProperty('opacity', '1', 'important');
+                    }
+                    curr = curr.parentElement;
+                }
+            });
         """)
     except:
         pass
@@ -115,8 +135,14 @@ def wait_for_visible_slots(page: Page, timeout=25000):
             
         time.sleep(1)
     
-    # Intento final con el selector estándar
-    return page.wait_for_selector(".career-teamslot", state="visible", timeout=2000)
+    # Intento final: Si no es visible, pero está en el DOM, procedemos con precaución
+    try:
+        if page.locator(".career-teamslot").count() > 0:
+            print("  ⚠️ Slots detectados en el DOM pero Playwright aún los ve 'ocultos'. Procediendo igual...")
+            return True
+        return page.wait_for_selector(".career-teamslot", state="attached", timeout=5000)
+    except:
+        return False
 
 def get_slot_info(slot_locator):
     """
@@ -257,11 +283,14 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
                 
                 if "PrivacyNotice" in current_url:
                     print("    ⚖️ Aviso de privacidad detectado. Aceptando...")
-                    accept_btn = page.get_by_role("button", name=re.compile("Accept|Agree|Aceptar|OK", re.IGNORECASE))
-                    if accept_btn.is_visible():
+                    # Buscar botones de aceptar (pueden ser varios formatos)
+                    accept_btn = page.locator("button:has-text('Accept'), button:has-text('Aceptar'), button:has-text('Agree'), button:has-text('OK')").first
+                    if accept_btn.is_visible(timeout=5000):
                         accept_btn.click(force=True)
-                        page.wait_for_timeout(2000)
-                        page.goto(LOGIN_URL, wait_until="domcontentloaded")
+                        print("    ✅ Botón clickeado, esperando redirección...")
+                        page.wait_for_timeout(3000)
+                        if "PrivacyNotice" in page.url:
+                             page.goto(LOGIN_URL, wait_until="domcontentloaded")
                     continue
                 
                 if "Register" in current_url:
@@ -277,20 +306,24 @@ def login_to_osm(page: Page, osm_username: str, osm_password: str, max_retries: 
                         print(f"    📝 Rellenando formulario para {osm_username}...")
                         username_input.fill(osm_username)
                         password_input.fill(osm_password)
-                        page.locator("button#login").click() # Cambiado de Enter a Clic directo
-                        time.sleep(8)
                         
-                        try:
-                            page.wait_for_function("() => window.location.href.includes('Career') || window.location.href.includes('ChooseLeague') || document.querySelector('.feedback-message') !== null", timeout=15000)
-                            error_msg = page.locator(".feedbackcontainer .feedback-message")
-                            if error_msg.is_visible(timeout=2000):
-                                print(f"    ❌ Error de OSM: {error_msg.inner_text()}")
-                                raise InvalidCredentialsError(f"OSM: {error_msg.inner_text()}")
-                        except PlaywrightTimeoutError: 
-                            print("    ⏳ Espera terminada, revisando URL de nuevo...")
-                            pass
+                        login_btn = page.locator("button#login")
+                        if login_btn.is_enabled():
+                            login_btn.click(force=True)
+                            page.keyboard.press("Enter")
+                            print("    🚀 Formulario enviado. Esperando respuesta...")
+                            try:
+                                page.wait_for_function("() => window.location.href.includes('Career') || window.location.href.includes('ChooseLeague') || document.querySelector('.feedback-message') !== null", timeout=15000)
+                                error_msg = page.locator(".feedbackcontainer .feedback-message")
+                                if error_msg.is_visible(timeout=2000):
+                                    print(f"    ❌ Error de OSM: {error_msg.inner_text()}")
+                                    raise InvalidCredentialsError(f"OSM: {error_msg.inner_text()}")
+                            except PlaywrightTimeoutError: 
+                                pass
+                        else:
+                            print("    ⌛ Botón de login deshabilitado...")
                     else:
-                        print("    ⌛ Esperando a que el formulario sea visible...")
+                        print("    ⌛ Esperando formulario...")
                 
                 time.sleep(2)
         except InvalidCredentialsError as e: raise e

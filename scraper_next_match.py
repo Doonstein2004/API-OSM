@@ -124,7 +124,7 @@ def get_next_match_info(page: Page):
                     
                     # Re-obtener el slot fresco para evitar stale element
                     slot = page.locator(".career-teamslot").nth(i)
-                    slot.click(timeout=15000)
+                    slot.click(timeout=15000, force=True)
                     
                     # Esperar a que cargue algo (puede ser Dashboard o MatchExperience)
                     page.wait_for_selector("#timers", timeout=45000)

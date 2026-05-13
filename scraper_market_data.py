@@ -60,7 +60,7 @@ def get_market_data(page: Page):
             print(f"Procesando: {team_name} en {league_name}")
 
             
-            slot.click()
+            slot.click(force=True)
             page.wait_for_selector("#timers", timeout=60000)
             handle_popups(page)
 
