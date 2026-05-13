@@ -76,8 +76,8 @@ def get_next_match_info(page: Page):
                         page.reload(wait_until="domcontentloaded", timeout=30000)
                     
                     # Esperar a que aparezcan los slots
-                    page.wait_for_selector(".career-teamslot", timeout=20000)
-                    handle_popups(page)
+                    from utils import wait_for_visible_slots
+                    wait_for_visible_slots(page, timeout=20000)
                     
                     # Pequeña pausa para estabilizar el DOM
                     time.sleep(1)

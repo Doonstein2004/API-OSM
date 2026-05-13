@@ -38,8 +38,8 @@ def get_tactics_data(page: Page):
                     else:
                         page.reload(wait_until="domcontentloaded", timeout=30000)
                     
-                    page.wait_for_selector(".career-teamslot", timeout=20000)
-                    handle_popups(page)
+                    from utils import wait_for_visible_slots
+                    wait_for_visible_slots(page, timeout=20000)
                     time.sleep(1)
                     break
                     

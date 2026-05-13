@@ -31,8 +31,8 @@ def get_league_data(page):
                 page.goto(MAIN_DASHBOARD_URL)
             
             try:
-                handle_popups(page)
-                page.wait_for_selector(".career-teamslot", timeout=35000)
+                from utils import wait_for_visible_slots
+                wait_for_visible_slots(page, timeout=35000)
             except:
                 print("No se encontraron slots de carrera. Posible error de carga.")
                 break

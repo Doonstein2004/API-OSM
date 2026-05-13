@@ -44,8 +44,8 @@ def get_market_data(page: Page):
                 page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded")
             
             try:
-                handle_popups(page)
-                page.wait_for_selector(".career-teamslot", timeout=20000)
+                from utils import wait_for_visible_slots
+                wait_for_visible_slots(page, timeout=20000)
             except: break
 
             slot = page.locator(".career-teamslot").nth(i)

@@ -9,10 +9,10 @@ class InvalidCredentialsError(Exception):
 
 def handle_popups(page: Page):
     """
-    Versión v4.3: Cierra modales agresivos, incluyendo el aviso de Password Login y modales de "Searching".
+    Versión v4.4: Cierra modales agresivos, incluyendo avisos de Cookies, Privacidad y Password Login.
     """
     try:
-        # 1. Selectores de botones de "Entendido" / "Continuar"
+        # 1. Selectores de botones de "Entendido" / "Aceptar" / "Cookies"
         understand_selectors = [
             "button:has-text('I understand')",
             "div.btn-new:has-text('I understand')",
@@ -26,7 +26,14 @@ def handle_popups(page: Page):
             "button:has-text('View later')",
             "button:has-text('Ver más tarde')",
             "button:has-text('Accept')",
-            "button:has-text('Aceptar')"
+            "button:has-text('Aceptar')",
+            "button:has-text('Agree')",
+            "button:has-text('Aceptar todo')",
+            "button:has-text('Accept all')",
+            "button#onetrust-accept-btn-handler", # Common cookie consent
+            ".qc-cmp2-footer button:has-text('AGREE')", # Quantcast
+            ".btn-primary:has-text('OK')",
+            "button:has-text('Got it!')"
         ]
         for sel in understand_selectors:
             try:
@@ -39,17 +46,22 @@ def handle_popups(page: Page):
     except:
         pass
 
-    # 2. Inyección de CSS para ocultar elementos molestos
+    # 2. Inyección de CSS para ocultar elementos molestos y forzar visibilidad
     try:
         page.add_style_tag(content="""
             #preloader-image, .modal-backdrop, #genericModalContainer, 
             .social-login-modal, #social-login-container, .facebook-login-button, 
             iframe[src*="facebook"], #manager-social-login,
             #skillRatingUpdate-modal-content, .tier-up-title, .shield-animation-container,
-            .modal-dialog .close-button-container { 
+            .modal-dialog .close-button-container, .loading-overlay, .vwo-overlay,
+            #onetrust-banner-sdk { 
                 display: none !important; 
                 visibility: hidden !important; 
                 pointer-events: none !important; 
+            }
+            .career-teamslot {
+                visibility: visible !important;
+                opacity: 1 !important;
             }
         """)
     except:
@@ -58,31 +70,53 @@ def handle_popups(page: Page):
     # 3. Limpieza de modales vía JS
     try:
         page.evaluate("""
-            document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
-                const closeBtn = modal.querySelector('button.close, .btn-close, [data-dismiss="modal"], .close-button-container button');
-                if (closeBtn) closeBtn.click();
+            document.querySelectorAll('.modal.in, .modal.show, .modal-backdrop').forEach(el => {
+                el.classList.remove('in', 'show');
+                el.style.display = 'none';
+                el.remove();
             });
-            document.querySelectorAll('#preloader-image, .modal-backdrop').forEach(el => el.remove());
-            setTimeout(() => {
-                document.querySelectorAll('.modal.in, .modal.show').forEach(modal => {
-                    modal.classList.remove('in', 'show');
-                    modal.style.display = 'none';
-                });
-                document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
-                document.body.classList.remove('modal-open');
-            }, 100);
+            document.body.classList.remove('modal-open');
+            // Forzar que el scroll funcione
+            document.body.style.overflow = 'auto';
         """)
     except:
         pass
     
     # 4. Tecla Escape como último recurso
     try:
-        modal_visible = page.locator(".modal.in, .modal.show")
-        if modal_visible.count() > 0:
-            page.keyboard.press("Escape")
-            time.sleep(0.2)
+        page.keyboard.press("Escape")
     except:
         pass
+
+def wait_for_visible_slots(page: Page, timeout=25000):
+    """
+    Espera robusta a que los slots de carrera sean visibles.
+    Si están presentes pero ocultos, intenta limpiar popups repetidamente.
+    """
+    start_time = time.time()
+    while time.time() - start_time < (timeout / 1000):
+        handle_popups(page)
+        try:
+            # Esperar un poco a que Playwright detecte visibilidad
+            slots = page.locator(".career-teamslot")
+            if slots.count() > 0 and slots.first.is_visible(timeout=2000):
+                return True
+        except:
+            pass
+        
+        # Si no son visibles, tal vez están presentes pero ocultos
+        try:
+            if page.locator(".career-teamslot").count() > 0:
+                print("  ⚠️ Slots presentes pero ocultos. Reintentando limpieza...")
+                # Intentar forzar visibilidad vía JS
+                page.evaluate("document.querySelectorAll('.career-teamslot').forEach(el => el.style.display='block');")
+        except:
+            pass
+            
+        time.sleep(1)
+    
+    # Intento final con el selector estándar
+    return page.wait_for_selector(".career-teamslot", state="visible", timeout=2000)
 
 def get_slot_info(slot_locator):
     """
@@ -379,12 +413,16 @@ def login_with_session_cache(browser, conn, user_id: str, osm_username: str, osm
             time.sleep(2)
             handle_popups(page)
             
-            # Verificar si la sesión sigue activa
-            if SUCCESS_REGEX.search(page.url):
-                print("  ✅ Sesión restaurada correctamente. Login omitido.")
-                return context, page
-            else:
-                print(f"  ⚠️ Sesión inválida (URL: {page.url}). Haciendo login...")
+            # Verificar si la sesión sigue activa comprobando si hay slots visibles
+            try:
+                # Si estamos en /Career o /ChooseLeague, pero los slots no aparecen tras un tiempo,
+                # probablemente la sesión caducó o estamos en una vista de invitado.
+                if SUCCESS_REGEX.search(page.url):
+                    page.wait_for_selector(".career-teamslot", timeout=10000)
+                    print("  ✅ Sesión restaurada correctamente. Login omitido.")
+                    return context, page
+            except:
+                print(f"  ⚠️ Sesión parece inactiva o slots no cargan (URL: {page.url}). Haciendo login...")
                 page.close()
                 context.close()
         except Exception as e:
