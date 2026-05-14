@@ -1,3 +1,4 @@
+from __future__ import annotations
 from playwright.sync_api import expect, Error as PlaywrightError, Page
 import time
 import os, re
@@ -108,93 +109,103 @@ def handle_popups(page: Page):
     except:
         pass
 
-def wait_for_visible_slots(page: Page, timeout=25000):
+def wait_for_visible_slots(page: Page, timeout=40000):
     """
     Espera robusta a que los slots de carrera sean visibles.
     Si están presentes pero ocultos, intenta limpiar popups repetidamente.
     """
+    print(f"  🔍 Esperando slots (timeout {timeout/1000}s)...")
     start_time = time.time()
     while time.time() - start_time < (timeout / 1000):
         handle_popups(page)
         try:
-            # Esperar un poco a que Playwright detecte visibilidad
+            # Esperar a que al menos existan slots en el DOM
             slots = page.locator(".career-teamslot")
-            if slots.count() > 0 and slots.first.is_visible(timeout=2000):
-                return True
+            count = slots.count()
+            if count > 0:
+                # Verificar si al menos uno es visible
+                visible_found = False
+                for i in range(count):
+                    if slots.nth(i).is_visible():
+                        visible_found = True
+                        break
+                
+                if visible_found:
+                    # Esperar un momento extra para que el contenido interno cargue
+                    page.wait_for_timeout(1000)
+                    return True
         except:
             pass
         
-        # Si no son visibles, tal vez están presentes pero ocultos
+        # Si no son visibles, tal vez están presentes pero ocultos por un overlay
         try:
             if page.locator(".career-teamslot").count() > 0:
-                print("  ⚠️ Slots presentes pero ocultos. Reintentando limpieza...")
                 # Intentar forzar visibilidad vía JS
                 page.evaluate("document.querySelectorAll('.career-teamslot').forEach(el => el.style.display='block');")
         except:
             pass
             
-        time.sleep(1)
+        time.sleep(1.5)
     
-    # Intento final: Si no es visible, pero está en el DOM, procedemos con precaución
-    try:
-        if page.locator(".career-teamslot").count() > 0:
-            print("  ⚠️ Slots detectados en el DOM pero Playwright aún los ve 'ocultos'. Procediendo igual...")
-            return True
-        return page.wait_for_selector(".career-teamslot", state="attached", timeout=5000)
-    except:
-        return False
+    return False
 
-def get_slot_info(slot_locator):
+def get_slot_info(slot_locator, max_retries=5):
     """
     Extrae información de un slot de carrera de forma segura.
     Maneja múltiples títulos (Searching, Unavailable) y evita Strict Mode Violations.
-    
-    Returns:
-        tuple: (team_name, league_name) o (None, None) si el slot es inválido.
+    Añade reintentos si el slot aparece como 'Unavailable' para esperar a que cargue.
     """
-    try:
-        # Buscar títulos posibles
-        titles = slot_locator.locator("h2.clubslot-main-title")
-        count = titles.count()
-        
-        if count == 0:
-            return None, None
+    for attempt in range(max_retries):
+        try:
+            # Buscar títulos posibles
+            titles = slot_locator.locator("h2.clubslot-main-title")
+            count = titles.count()
             
-        team_name = ""
-        is_searching = False
-        is_unavailable = False
-        
-        for i in range(count):
-            txt = titles.nth(i).inner_text().strip()
-            if not txt: continue
+            if count == 0:
+                time.sleep(1)
+                continue
+                
+            team_name = ""
+            is_searching = False
+            is_unavailable = False
             
-            if "Searching" in txt:
-                is_searching = True
-            elif "unavailable" in txt.lower():
-                is_unavailable = True
+            for i in range(count):
+                txt = titles.nth(i).inner_text().strip()
+                if not txt: continue
+                
+                if "Searching" in txt:
+                    is_searching = True
+                elif "unavailable" in txt.lower():
+                    is_unavailable = True
+                else:
+                    # Si no es un mensaje de estado, asumimos que es el nombre del equipo
+                    db_attr = titles.nth(i).get_attribute("data-bind") or ""
+                    if "teamPartial" in db_attr:
+                        team_name = txt
+                        break
+                    elif not team_name:
+                        team_name = txt
+            
+            if is_searching:
+                print(f"    ⏳ Slot en estado 'Searching' (Intento {attempt+1})...")
+            elif is_unavailable:
+                print(f"    ⏳ Slot en estado 'Unavailable' (Intento {attempt+1})...")
+            elif not team_name:
+                print(f"    ⏳ Slot sin nombre de equipo (Intento {attempt+1})...")
             else:
-                # Si no es un mensaje de estado, asumimos que es el nombre del equipo
-                # Priorizamos el que tiene el data-bind de teamPartial si hay varios
-                db_attr = titles.nth(i).get_attribute("data-bind") or ""
-                if "teamPartial" in db_attr:
-                    team_name = txt
-                    break
-                elif not team_name:
-                    team_name = txt
-        
-        if is_searching or is_unavailable or not team_name:
-            state = "Searching" if is_searching else ("Unavailable" if is_unavailable else "Empty")
-            print(f"    ⚠️ Slot omitido: {state}")
-            return None, None
+                # Éxito: Tenemos nombre de equipo
+                league_loc = slot_locator.locator("h4.display-name")
+                league_name = league_loc.first.inner_text().strip() if league_loc.count() > 0 else "Unknown"
+                return team_name, league_name
+                
+            # Si llegamos aquí es porque está en un estado no deseado, esperamos y reintentamos
+            time.sleep(2)
             
-        league_loc = slot_locator.locator("h4.display-name")
-        league_name = league_loc.first.inner_text().strip() if league_loc.count() > 0 else "Unknown"
-        
-        return team_name, league_name
-        
-    except Exception as e:
-        print(f"    ⚠️ Error extrayendo info del slot: {e}")
-        return None, None
+        except Exception as e:
+            print(f"    ⚠️ Error en get_slot_info (Intento {attempt+1}): {e}")
+            time.sleep(1)
+            
+    return None, None
 
     
 def safe_navigate(page: Page, url: str, verify_selector: str = None, max_retries=3):
