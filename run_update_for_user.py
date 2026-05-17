@@ -290,7 +290,39 @@ def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, sta
                         VALUES (%s, %s, TRUE, NOW())
                         ON CONFLICT (user_id, league_id) DO UPDATE SET is_active = TRUE, last_scraped_at = NOW()
                     """, (user_id, final_id))
+                else:
+                    # Asegurarnos de que el vínculo esté activo
+                    cur.execute("UPDATE user_leagues SET is_active = TRUE WHERE user_id = %s AND league_id = %s", (user_id, final_id))
+                    
                 cur.execute("UPDATE leagues SET name = %s WHERE id = %s", (dash_name, final_id))
+                
+                # Actualizar la lista de equipos (teams) si hay nuevos
+                cur.execute("SELECT teams FROM leagues WHERE id = %s", (final_id,))
+                row = cur.fetchone()
+                existing_teams = []
+                if row and row[0]:
+                    try:
+                        existing_teams = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+                    except Exception:
+                        existing_teams = []
+                
+                existing_team_names = {t.get("name", t.get("Club")) for t in existing_teams}
+                added_new_teams = False
+                
+                for s in ls_data.get("standings", []):
+                    club_name = s.get("Club")
+                    if club_name and club_name not in existing_team_names:
+                        existing_teams.append({
+                            "name": club_name,
+                            "initialValue": 0,
+                            "fixedIncomePerRound": 0
+                        })
+                        existing_team_names.add(club_name)
+                        added_new_teams = True
+                
+                if added_new_teams:
+                    cur.execute("UPDATE leagues SET teams = %s WHERE id = %s", (json.dumps(existing_teams), final_id))
+
                 # Actualizar last_scraped_at para TODOS los usuarios de esta liga
                 cur.execute("UPDATE user_leagues SET last_scraped_at = NOW() WHERE league_id = %s", (final_id,))
             conn.commit()
