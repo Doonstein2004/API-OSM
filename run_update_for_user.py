@@ -21,7 +21,7 @@ from playwright.sync_api import sync_playwright
 
 
 # --- Módulos Locales ---
-from utils import login_to_osm, InvalidCredentialsError, login_with_session_cache
+from utils import login_to_osm, InvalidCredentialsError, login_with_session_cache, launch_playwright_browser
 from notifications import init_firebase_admin, analyze_and_notify
 
 # --- Importar las funciones de los scrapers ---
@@ -920,8 +920,7 @@ def run_update_for_user(user_id):
     try:
         scrape_timestamp = datetime.now() 
         with sync_playwright() as p:
-            is_gha = os.getenv("GITHUB_ACTIONS") == "true"
-            browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
+            browser = launch_playwright_browser(p)
             
             try:
                 context, page = login_with_session_cache(

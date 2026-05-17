@@ -77,7 +77,8 @@ def get_next_match_info(page: Page):
                     
                     # Esperar a que aparezcan los slots
                     from utils import wait_for_visible_slots
-                    wait_for_visible_slots(page, timeout=20000)
+                    if not wait_for_visible_slots(page, timeout=20000):
+                        raise Exception("No se encontraron slots de carrera a tiempo")
                     
                     # Pequeña pausa para estabilizar el DOM
                     time.sleep(1)
@@ -116,52 +117,12 @@ def get_next_match_info(page: Page):
                 continue
 
 
-            # === HACER CLICK EN EL SLOT CON REINTENTOS ===
-            click_success = False
-            for click_attempt in range(3):
-                try:
-                    handle_popups(page)
-                    
-                    # Re-obtener el slot fresco para evitar stale element
-                    slot = page.locator(".career-teamslot").nth(i)
-                    slot.click(timeout=15000, force=True)
-                    
-                    # Esperar a que cargue algo (puede ser Dashboard o MatchExperience)
-                    page.wait_for_selector("#timers", timeout=45000)
-                    handle_popups(page)
-                    
-                    click_success = True
-                    break
-                    
-                except Exception as click_error:
-                    print(f"  ⚠️ Error click (intento {click_attempt + 1}): {click_error}")
-                    if click_attempt < 2:
-                        # Volver a navegar al Career
-                        try:
-                            page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded", timeout=30000)
-                            page.wait_for_selector(".career-teamslot", timeout=15000)
-                            handle_popups(page)
-                            time.sleep(1)
-                        except:
-                            pass
-            
-            if not click_success:
+            # === HACER CLICK EN EL SLOT ===
+            from utils import click_slot_and_wait_for_dashboard
+            if not click_slot_and_wait_for_dashboard(page, i):
                 print(f"  ❌ No se pudo activar el slot {i+1}. Saltando.")
                 continue
-            
-            # === NAVEGAR EXPLÍCITAMENTE A /Dashboard ===
-            # Esto es necesario porque el click en slot puede llevarnos a /MatchExperience
-            DASHBOARD_URL = "https://en.onlinesoccermanager.com/Dashboard"
-            try:
-                if "/Dashboard" not in page.url:
-                    page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_selector("#timers", timeout=15000)
-                    handle_popups(page)
-                    time.sleep(0.5)
-            except Exception as nav_error:
-                print(f"  ⚠️ Error navegando a Dashboard: {nav_error}")
-                # Continuamos de todas formas, intentaremos extraer lo que podamos
-            
+
             # === EXTRAER INFO DEL PRÓXIMO PARTIDO ===
             try:
                 match_info = extract_next_match_from_dashboard(page)

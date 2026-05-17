@@ -149,7 +149,7 @@ def wait_for_visible_slots(page: Page, timeout=40000):
     
     return False
 
-def get_slot_info(slot_locator, max_retries=5):
+def get_slot_info(slot_locator, max_retries=10):
     """
     Extrae información de un slot de carrera de forma segura.
     Maneja múltiples títulos (Searching, Unavailable) y evita Strict Mode Violations.
@@ -157,6 +157,11 @@ def get_slot_info(slot_locator, max_retries=5):
     """
     for attempt in range(max_retries):
         try:
+            # Si el slot está explícitamente vacío, no perder tiempo reintentando
+            if slot_locator.locator(".career-teamslot-empty-label").count() > 0:
+                print(f"    ℹ️ Slot sin utilizar detectado. Omitiendo.")
+                return None, None
+                
             # Buscar títulos posibles
             titles = slot_locator.locator("h2.clubslot-main-title")
             count = titles.count()
@@ -457,18 +462,26 @@ def login_with_session_cache(browser, conn, user_id: str, osm_username: str, osm
             time.sleep(2)
             handle_popups(page)
             
-            # Verificar si la sesión sigue activa comprobando si hay slots visibles
+            # Verificar si la sesión sigue activa comprobando si el perfil del manager cargó correctamente
             try:
-                # Si estamos en /Career o /ChooseLeague, pero los slots no aparecen tras un tiempo,
-                # probablemente la sesión caducó o estamos en una vista de invitado.
                 if SUCCESS_REGEX.search(page.url):
-                    page.wait_for_selector(".career-teamslot", timeout=10000)
-                    print("  ✅ Sesión restaurada correctamente. Login omitido.")
-                    return context, page
-            except:
-                print(f"  ⚠️ Sesión parece inactiva o slots no cargan (URL: {page.url}). Haciendo login...")
-                page.close()
-                context.close()
+                    print("  🔍 Verificando autenticación de la sesión...")
+                    # Esperar a que el nombre del manager esté visible en el DOM (indica que la API de perfil cargó)
+                    page.wait_for_selector(".manager-name-text", timeout=12000, state="visible")
+                    mgr_name = page.locator(".manager-name-text").first.inner_text().strip()
+                    
+                    if mgr_name.lower() == osm_username.lower():
+                        print(f"  ✅ Sesión activa confirmada para el manager: {mgr_name}")
+                        return context, page
+                    else:
+                        raise Exception(f"Nombre de manager no coincide ({mgr_name} vs {osm_username})")
+            except Exception as check_err:
+                print(f"  ⚠️ Sesión parece inactiva o no autenticada ({check_err}). Haciendo login...")
+                try:
+                    page.close()
+                    context.close()
+                except:
+                    pass
         except Exception as e:
             print(f"  ⚠️ Error restaurando sesión: {e}. Haciendo login...")
             try:
@@ -493,3 +506,104 @@ def login_with_session_cache(browser, conn, user_id: str, osm_username: str, osm
         print(f"  ⚠️ No se pudo capturar el storage_state: {e}")
     
     return context, page
+
+
+def launch_playwright_browser(p, headless=None):
+    """
+    Inicia un navegador Playwright de forma robusta.
+    Autodetecta Brave browser local si está disponible para evitar fallos de librerías en Chromium.
+    Por defecto corre en headless=True para evitar errores de X11 en segundo plano, 
+    pero se puede forzar con la variable de entorno HEADLESS=false o pasándole el parámetro.
+    """
+    import os
+    is_gha = os.getenv("GITHUB_ACTIONS") == "true"
+    
+    # Determinar headless
+    if headless is None:
+        env_headless = os.getenv("HEADLESS")
+        if env_headless is not None:
+            headless = env_headless.lower() in ("true", "1")
+        else:
+            # En GitHub Actions siempre headless. En local, no-headless (visible) por defecto
+            headless = True if is_gha else False
+            
+    # Autodetectar Brave browser local
+    executable_path = None
+    if not is_gha:
+        for path in ["/usr/bin/brave-browser", "/usr/bin/brave"]:
+            if os.path.exists(path):
+                executable_path = path
+                break
+                
+    launch_args = {
+        "headless": headless,
+        "args": ["--no-sandbox", "--disable-setuid-sandbox"]
+    }
+    if executable_path:
+        launch_args["executable_path"] = executable_path
+        print(f"🌐 Usando Brave Browser para scraping: {executable_path}")
+    else:
+        print("🌐 Usando Chromium por defecto de Playwright")
+        
+    return p.chromium.launch(**launch_args)
+
+
+def click_slot_and_wait_for_dashboard(page: Page, slot_index: int, max_retries=3) -> bool:
+    """
+    Hace click en un slot de carrera e ingresa robustamente al dashboard del equipo.
+    Si se detecta redirección a la animación de partido (MatchExperience), 
+    la salta navegando directamente a /Dashboard.
+    """
+    MAIN_DASHBOARD_URL = "https://en.onlinesoccermanager.com/Career"
+    DASHBOARD_URL = "https://en.onlinesoccermanager.com/Dashboard"
+    
+    print(f"  - Activando Slot #{slot_index + 1}...")
+    
+    for attempt in range(max_retries):
+        try:
+            handle_popups(page)
+            
+            # Re-obtener el slot para evitar stale element
+            slots = page.locator(".career-teamslot")
+            if slots.count() <= slot_index:
+                print(f"  ❌ El slot #{slot_index + 1} no existe en el DOM.")
+                return False
+                
+            slot = slots.nth(slot_index)
+            slot.click(timeout=15000, force=True)
+            
+            # Esperar a que ocurra una de las siguientes opciones:
+            # 1. Cargue #timers (Dashboard normal)
+            # 2. Navegue a MatchExperience (Animación de partido)
+            try:
+                page.wait_for_function("""
+                    () => document.querySelector('#timers') !== null || window.location.href.includes('MatchExperience')
+                """, timeout=30000)
+            except Exception as wait_err:
+                print(f"    ⚠️ Espera de redirección agotada en intento {attempt+1}: {wait_err}")
+            
+            # Saltar MatchExperience si ocurre
+            if "MatchExperience" in page.url:
+                print("    ⚠️ Redirigido a MatchExperience. Evitando la animación navegando a Dashboard...")
+                page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30000)
+            
+            # Esperar confirmación de timers
+            page.wait_for_selector("#timers", timeout=30000)
+            handle_popups(page)
+            return True
+            
+        except Exception as e:
+            print(f"    ⚠️ Error al activar slot #{slot_index + 1} (intento {attempt+1}): {e}")
+            if attempt < max_retries - 1:
+                try:
+                    # Recuperar navegando al Career
+                    page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded", timeout=30000)
+                    from utils import wait_for_visible_slots
+                    wait_for_visible_slots(page, timeout=15000)
+                    time.sleep(1)
+                except:
+                    pass
+                    
+    return False
+
+
