@@ -30,10 +30,8 @@ def get_league_data(page):
             if page.url != MAIN_DASHBOARD_URL:
                 page.goto(MAIN_DASHBOARD_URL)
             
-            try:
-                from utils import wait_for_visible_slots
-                wait_for_visible_slots(page, timeout=35000)
-            except:
+            from utils import wait_for_visible_slots
+            if not wait_for_visible_slots(page, timeout=35000):
                 print("No se encontraron slots de carrera. Posible error de carga.")
                 break
 
@@ -48,11 +46,12 @@ def get_league_data(page):
 
             print(f"Procesando equipo: {team_name} en la liga {league_name}")
 
+            # Hacer clic en el slot para activar ese equipo de forma robusta
+            from utils import click_slot_and_wait_for_dashboard
+            if not click_slot_and_wait_for_dashboard(page, i):
+                print(f"  ❌ No se pudo activar el slot {i+1}. Saltando.")
+                continue
 
-            # Hacer clic en el slot para activar ese equipo
-            slot.click(force=True)
-            page.wait_for_selector("#timers", timeout=45000)
-            handle_popups(page)
             
             # --- EXTRAER DATOS DE LA LIGA ---
             try:

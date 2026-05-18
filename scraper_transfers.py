@@ -73,23 +73,28 @@ def get_transfers_data(page):
                     more_button = page.locator('button:has-text("More transfers")')
                     
                     while more_button.is_visible(timeout=5000):
-                        old_row_count = history_table.locator("tbody tr").count()
-                        more_button.click()
+                        if more_button.is_disabled():
+                            print("    ℹ️ El botón 'More transfers' está deshabilitado. Historial completo.")
+                            break
                         
-                        # Bucle de espera manual
-                        # Intentaremos hasta 10 veces (20 segundos en total) a que las filas aumenten
-                        wait_success = False
-                        for _ in range(10): # 10 reintentos
-                            time.sleep(2) # Espera 2 segundos entre cada comprobación
+                        try:
+                            # Obtener el conteo de filas actual antes del click
+                            old_row_count = history_table.locator("tbody tr").count()
+                            
+                            # Hacer click con timeout bajo
+                            more_button.click(timeout=3000)
+                            
+                            # Esperar dinámicamente (hasta 5s) a que el conteo de filas aumente
+                            page.wait_for_function(
+                                f"document.querySelectorAll('#transfer-history table.table tbody tr').length > {old_row_count}",
+                                timeout=5000
+                            )
+                            
                             new_row_count = history_table.locator("tbody tr").count()
-                            if new_row_count > old_row_count:
-                                print(f"    - Cargadas {new_row_count - old_row_count} filas más (Total: {new_row_count})")
-                                wait_success = True
-                                break # Salir del bucle de espera si las filas aumentaron
-                        
-                        if not wait_success:
-                            print("    - El botón 'More transfers' fue presionado pero no cargó más filas después de 20 segundos. Asumiendo que se ha cargado todo.")
-                            break # Salir del bucle principal 'while'
+                            print(f"    - Cargadas {new_row_count - old_row_count} filas más (Total: {new_row_count})")
+                        except Exception as wait_err:
+                            print(f"    ℹ️ Finalizada la carga de historial (no se detectaron más filas nuevas): {wait_err}")
+                            break
 
                     print("  - Todos los registros cargados.")
                     # --- FIN DE LA LÓGICA DE CARGA MEJORADA ---

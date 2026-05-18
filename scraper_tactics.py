@@ -39,7 +39,8 @@ def get_tactics_data(page: Page):
                         page.reload(wait_until="domcontentloaded", timeout=30000)
                     
                     from utils import wait_for_visible_slots
-                    wait_for_visible_slots(page, timeout=20000)
+                    if not wait_for_visible_slots(page, timeout=20000):
+                        raise Exception("No se encontraron slots de carrera a tiempo")
                     time.sleep(1)
                     break
                     
@@ -74,33 +75,12 @@ def get_tactics_data(page: Page):
                 print(f"  ⚠️ Error verificando slot {i+1}: {slot_error}")
                 continue
 
-
-            # === HACER CLICK EN EL SLOT CON REINTENTOS ===
-            click_success = False
-            for click_attempt in range(3):
-                try:
-                    handle_popups(page)
-                    slot = page.locator(".career-teamslot").nth(i)
-                    slot.click(timeout=15000, force=True)
-                    page.wait_for_selector("#timers", timeout=45000)
-                    handle_popups(page)
-                    click_success = True
-                    break
-                    
-                except Exception as click_error:
-                    print(f"  ⚠️ Error click (intento {click_attempt + 1}): {click_error}")
-                    if click_attempt < 2:
-                        try:
-                            page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded", timeout=30000)
-                            page.wait_for_selector(".career-teamslot", timeout=15000)
-                            handle_popups(page)
-                            time.sleep(1)
-                        except:
-                            pass
-            
-            if not click_success:
+            # === HACER CLICK EN EL SLOT ===
+            from utils import click_slot_and_wait_for_dashboard
+            if not click_slot_and_wait_for_dashboard(page, i):
                 print(f"  ❌ No se pudo activar el slot {i+1}. Saltando.")
                 continue
+
 
             # === NAVEGAR A TÁCTICAS ===
             try:

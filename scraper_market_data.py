@@ -43,10 +43,9 @@ def get_market_data(page: Page):
             if not page.url.endswith("/Career"):
                 page.goto(MAIN_DASHBOARD_URL, wait_until="domcontentloaded")
             
-            try:
-                from utils import wait_for_visible_slots
-                wait_for_visible_slots(page, timeout=20000)
-            except: break
+            from utils import wait_for_visible_slots
+            if not wait_for_visible_slots(page, timeout=20000):
+                break
 
             slot = page.locator(".career-teamslot").nth(i)
             
@@ -59,10 +58,11 @@ def get_market_data(page: Page):
                 
             print(f"Procesando: {team_name} en {league_name}")
 
-            
-            slot.click(force=True)
-            page.wait_for_selector("#timers", timeout=60000)
-            handle_popups(page)
+            # Hacer clic en el slot para activar ese equipo de forma robusta
+            from utils import click_slot_and_wait_for_dashboard
+            if not click_slot_and_wait_for_dashboard(page, i):
+                print(f"  ❌ No se pudo activar el slot {i+1}. Saltando.")
+                continue
 
             
             # --- EXTRACCIÓN CON FALLBACK ---
@@ -160,22 +160,34 @@ def get_market_data(page: Page):
                 try:
                     page.wait_for_selector("#transfer-history table.table", timeout=10000)
                     
-                    # Cargar historial exhaustivo con límite de seguridad
-                    max_clicks = 150 # Límite para evitar bucles infinitos en caso de error de la UI
+                    # Cargar historial exhaustivo con límite de seguridad e inicio de espera inteligente y dinámica
+                    max_clicks = 150
                     clicks_done = 0
                     
                     while clicks_done < max_clicks:
                         btn = page.locator('button:has-text("More transfers")')
                         
-                        # Timeout bajo para salir rápido del bucle cuando el botón ya no esté
-                        if btn.is_visible(timeout=1000): 
+                        if btn.is_visible(timeout=1000):
+                            if btn.is_disabled():
+                                print("    ℹ️ El botón 'More transfers' está deshabilitado. Historial completo.")
+                                break
+                            
                             try:
-                                btn.click()
-                                time.sleep(0.5) # Pausa necesaria para permitir la solicitud de red
+                                # Obtener el conteo de filas actual antes del click
+                                old_count = page.locator("#transfer-history table.table tbody tr").count()
+                                
+                                # Hacer click con timeout bajo
+                                btn.click(timeout=3000)
+                                
+                                # Esperar dinámicamente (hasta 5s) a que el conteo de filas aumente
+                                page.wait_for_function(
+                                    f"document.querySelectorAll('#transfer-history table.table tbody tr').length > {old_count}",
+                                    timeout=5000
+                                )
                                 clicks_done += 1
-                            except Exception as click_err:
-                                print(f"    ⚠️ Interrupción al clickear 'More transfers': {click_err}")
-                                break # Salir si el botón existe pero no es interactuable
+                            except Exception as wait_err:
+                                print(f"    ℹ️ Finalizada la carga de historial (no se detectaron más filas nuevas): {wait_err}")
+                                break
                         else:
                             # El botón ya no es visible, se cargó todo el historial
                             break

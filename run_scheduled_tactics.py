@@ -17,7 +17,7 @@ import psycopg2.extras
 from playwright.sync_api import sync_playwright
 
 # --- Módulos Locales ---
-from utils import login_to_osm, InvalidCredentialsError, handle_popups, safe_navigate
+from utils import login_to_osm, InvalidCredentialsError, handle_popups, safe_navigate, launch_playwright_browser
 from scraper_tactics import get_tactics_data, extract_tactics_from_page
 
 # --- CONFIGURACIÓN ---
@@ -195,9 +195,10 @@ def scrape_tactics_for_slot(page, slot_index):
         team_name = slot.locator("h2.clubslot-main-title").inner_text()
         
         # Activar el slot
-        slot.click()
-        page.wait_for_selector("#timers", timeout=45000)
-        handle_popups(page)
+        from utils import click_slot_and_wait_for_dashboard
+        if not click_slot_and_wait_for_dashboard(page, slot_index):
+            return None
+
         
         # Ir a tácticas
         if not safe_navigate(page, TACTICS_URL, verify_selector="#tactics-overall"):
@@ -234,8 +235,7 @@ def process_user_tasks(conn, user_id, tasks):
     
     try:
         with sync_playwright() as p:
-            is_gha = os.getenv("GITHUB_ACTIONS") == "true"
-            browser = p.chromium.launch(headless=True if is_gha else False, args=["--no-sandbox"])
+            browser = launch_playwright_browser(p)
             context = browser.new_context(viewport={'width': 1280, 'height': 720})
             page = context.new_page()
             

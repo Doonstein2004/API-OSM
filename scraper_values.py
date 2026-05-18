@@ -39,10 +39,11 @@ def get_squad_values_data(page):
             # Extraemos el nombre de la liga del dashboard para usarlo como identificador
             league_name_on_dashboard = slot.locator("h4.display-name").inner_text()
             print(f"Procesando equipo: {team_name} en la liga {league_name_on_dashboard}")
+            from utils import click_slot_and_wait_for_dashboard
+            if not click_slot_and_wait_for_dashboard(page, i):
+                print(f"  ❌ No se pudo activar el slot {i+1}. Saltando.")
+                continue
 
-            slot.click()
-            page.wait_for_selector("#timers", timeout=40000)
-            handle_popups(page)
             
             # --- FASE 3: NAVEGAR Y EXTRAER VALORES DE EQUIPO ---
             try:

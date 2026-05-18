@@ -86,14 +86,11 @@ def get_match_results(page, scrape_future_fixtures=False):
 
             print(f"Procesando equipo: {team_name} en la liga {league_name}")
 
-
-            slot.click()
-            try:
-                page.wait_for_selector("#timers", timeout=45000)
-            except:
+            from utils import click_slot_and_wait_for_dashboard
+            if not click_slot_and_wait_for_dashboard(page, i):
+                print(f"  ❌ No se pudo activar el slot {i+1}. Saltando.")
                 continue
-                
-            handle_popups(page)
+
             
             try:
                 tabs_to_visit = ["/League/Results"]
