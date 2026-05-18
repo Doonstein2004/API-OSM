@@ -200,60 +200,63 @@ def resolve_active_leagues(fichajes_data, all_leagues_data, league_details_data,
 
 def find_matching_active_league(conn, user_id, dashboard_name, current_managers_dict, excluded_ids=None):
     """
-    Busca una liga existente en TODA la BD (no solo del usuario) que coincida con el fingerprint de managers (Team -> Manager).
-    Retorna (league_id, needs_new_link) donde needs_new_link indica si hay que vincular al usuario.
+    Busca una liga existente en TODA la BD que coincida con el fingerprint de managers.
+    Prioridad: 1) usuario ya vinculado (re-ejecución), 2) ratio de managers > 50%.
+    Nunca asigna a una liga con managers vacíos para evitar mezclar rooms distintos.
     """
     if excluded_ids is None: excluded_ids = set()
 
     with conn.cursor() as cur:
-        # BÚSQUEDA GLOBAL: Busca en TODAS las ligas con ese nombre (de cualquier usuario)
         sql = """
-            SELECT DISTINCT l.id, ul.managers_by_team 
+            SELECT DISTINCT ON (l.id) l.id, ul.managers_by_team, ul.user_id AS linked_user_id
             FROM leagues l
             JOIN user_leagues ul ON ul.league_id = l.id
             WHERE l.name = %s AND ul.is_active = TRUE;
         """
         cur.execute(sql, (dashboard_name,))
         candidates = cur.fetchall()
-        
-        best_id = None
-        best_ratio = 0.0
-        
-        for row in candidates:
-            if row['id'] in excluded_ids: continue # Saltar IDs ya usados
 
-            saved_mgrs_dict = row['managers_by_team'] or {}
-            
-            # Limpiar mánagers nulos o 'N/A'
-            saved_mgrs_clean = {k: v for k, v in saved_mgrs_dict.items() if v and v != "N/A"}
-            
-            if not saved_mgrs_clean:
-                # Priorizar liga vacía si no hay match
-                if best_id is None: best_id = row['id']
-                continue
-            
-            # Comparar el mapa (Team -> Manager)
-            matches = 0
-            for team, mgr in saved_mgrs_clean.items():
-                if current_managers_dict.get(team) == mgr:
-                    matches += 1
-                    
-            ratio = matches / len(saved_mgrs_clean) if len(saved_mgrs_clean) > 0 else 0
-            
-            if ratio > best_ratio:
-                best_ratio = ratio
-                best_id = row['id']
-        
-        if best_id:
-            # Consideramos un match si al menos el 50% de los mánagers guardados coinciden en sus respectivos equipos
-            match_found = best_ratio > 0.50 or (best_ratio == 0 and len(candidates) == 1 and candidates[0]['id'] not in excluded_ids)
-            if match_found:
-                # Verificar si el usuario ya está vinculado a esta liga
-                cur.execute("SELECT 1 FROM user_leagues WHERE user_id = %s AND league_id = %s", (user_id, best_id))
-                user_already_linked = cur.fetchone() is not None
-                return best_id, not user_already_linked  # (id, needs_new_link)
+    # Paso 1: si el usuario ya está vinculado a alguna de estas ligas, retornarla
+    # directamente (caso de re-ejecución o actualización periódica).
+    for row in candidates:
+        if row['id'] in excluded_ids:
+            continue
+        if str(row['linked_user_id']) == str(user_id):
+            return row['id'], False  # Ya vinculado, no necesita nuevo link
 
-        return None, False
+    # Paso 2: buscar la liga cuyo fingerprint de managers coincida mejor.
+    # NUNCA asignar a una liga con managers vacíos: no podemos distinguir rooms.
+    best_id = None
+    best_ratio = 0.0
+    seen_ids = set()
+
+    for row in candidates:
+        if row['id'] in excluded_ids or row['id'] in seen_ids:
+            continue
+        seen_ids.add(row['id'])
+
+        saved_mgrs_clean = {
+            k: v for k, v in (row['managers_by_team'] or {}).items()
+            if v and v != "N/A"
+        }
+
+        if not saved_mgrs_clean:
+            # Sin managers guardados no podemos confirmar que es el mismo room.
+            continue
+
+        matches = sum(1 for team, mgr in saved_mgrs_clean.items()
+                      if current_managers_dict.get(team) == mgr)
+        ratio = matches / len(saved_mgrs_clean)
+
+        if ratio > best_ratio:
+            best_ratio = ratio
+            best_id = row['id']
+
+    # Requerir al menos 50% de coincidencia para considerar que es el mismo room.
+    if best_id and best_ratio > 0.50:
+        return best_id, True  # Liga encontrada, hay que vincular al usuario
+
+    return None, False
 
 def sync_leagues_smart(conn, active_leagues_list, all_leagues_data, user_id, standings_data):
     print("\n🔄 Sincronizando IDs de ligas...")
