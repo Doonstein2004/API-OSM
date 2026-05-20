@@ -399,8 +399,16 @@ def sync_league_details(conn, standings_data, squad_values_data, processed_leagu
             cur.execute(sql, (json.dumps(standings), json.dumps(squad_vals), json.dumps(mgrs), league_id))
     conn.commit()
 
-def find_data_for_team(data_list, team_name):
+def find_data_for_team(data_list, team_name, league_name=None):
     norm_team = normalize_team_name(team_name)
+    # Primero intentar match exacto por equipo Y liga (necesario cuando el mismo
+    # nombre de equipo aparece en múltiples slots/ligas del mismo usuario).
+    if league_name:
+        for block in data_list:
+            if (normalize_team_name(block.get("team_name", "")) == norm_team
+                    and block.get("league_name") == league_name):
+                return block
+    # Fallback: solo por nombre de equipo
     for block in data_list:
         if normalize_team_name(block.get("team_name", "")) == norm_team:
             return block
@@ -414,8 +422,8 @@ def translate_and_group_transfers(fichajes_data, processed_leagues):
         league_id = item["league_id"]
         managed_team = item.get("managed_team", "")
         
-        team_block = find_data_for_team(fichajes_data, managed_team)
-        
+        team_block = find_data_for_team(fichajes_data, managed_team, item.get("dashboard_name"))
+
         if not team_block:
             print(f"    ⚠️ Mismatch detectado: fichajes para '{managed_team}' no encontrados. Saltando.")
             continue
@@ -459,7 +467,7 @@ def sync_transfer_list(conn, transfer_list_data, processed_leagues, user_id, ts)
             league_id = item["league_id"]
             managed_team = item.get("managed_team", "")
             
-            team_block = find_data_for_team(transfer_list_data, managed_team)
+            team_block = find_data_for_team(transfer_list_data, managed_team, item.get("dashboard_name"))
             if not team_block: continue
             
             players = team_block.get("players_on_sale", [])
@@ -501,7 +509,7 @@ def sync_matches(conn, matches_data, processed_leagues, user_id):
             league_id = item["league_id"]
             managed_team = item.get("managed_team", "")
             
-            matches_info = find_data_for_team(matches_data, managed_team)
+            matches_info = find_data_for_team(matches_data, managed_team, item.get("dashboard_name"))
             if not matches_info or "matches" not in matches_info: continue
 
             data_tuples = []
