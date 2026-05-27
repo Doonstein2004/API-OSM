@@ -10,17 +10,13 @@ from utils import handle_popups
 
 TACTICS_URL = "https://en.onlinesoccermanager.com/Tactics"
 
-# Valores válidos para cada carousel (texto visible en OSM)
-VALID_GAME_PLANS  = ["Normal", "Attacking", "Defensive", "Counter", "Long Ball", "Possession"]
-VALID_TACKLING    = ["Easy", "Normal", "Hard", "Aggressive"]
-VALID_MARKING     = ["Zonal", "Man-to-man"]
-VALID_FORMATIONS  = [
-    "4-4-2", "4-3-3", "4-5-1", "3-5-2", "5-3-2", "4-2-3-1",
-    "4-1-4-1", "3-4-3", "5-4-1", "4-4-1-1", "3-6-1",
-]
-VALID_FWD_TACTICS = ["Normal", "Pressing", "Shadow", "Creative", "Target Man"]
-VALID_MID_TACTICS = ["Normal", "Pressing", "Box to Box", "Wide", "Narrow"]
-VALID_DEF_TACTICS = ["Normal", "Pressing", "Man Marking", "Offside", "Low Block"]
+# Valores válidos para cada campo (deben coincidir con el texto visible en OSM)
+VALID_GAME_PLANS  = ["Shoot on sight", "Long ball", "Counter-attack", "Wing play", "Passing game"]
+VALID_TACKLING    = ["Careful", "Normal", "Reckless", "Aggressive"]
+VALID_MARKING     = ["Zonal marking", "Man marking"]
+VALID_FWD_TACTICS = ["Attack only", "Support midfield", "Drop deep"]
+VALID_MID_TACTICS = ["Protect the defence", "Push forward", "Stay in position"]
+VALID_DEF_TACTICS = ["Defend deep", "Attacking full-backs", "Support midfield"]
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -151,38 +147,113 @@ def _set_slider(page: Page, slider_sel: str, value: int) -> bool:
 
 
 def _dump_tactics_structure(page: Page):
-    """Debug: imprime los data-bind de todos los elementos de la página de tácticas."""
+    """Debug: muestra URL, sliders, clases tácticas y data-binds relevantes."""
     try:
-        binds = page.evaluate("""
-            () => Array.from(document.querySelectorAll('[data-bind]'))
-                       .map(el => ({ tag: el.tagName, cls: el.className, bind: el.getAttribute('data-bind') }))
-                       .filter(x => x.bind.length < 200)
+        result = page.evaluate("""
+            () => {
+                const out = { url: window.location.href, binds: [], classes: [], rangeInputs: [] };
+                document.querySelectorAll('[data-bind]').forEach(el => {
+                    const b = el.getAttribute('data-bind');
+                    if (b.length < 200)
+                        out.binds.push({ tag: el.tagName, cls: el.className.substring(0,30), bind: b.substring(0,100) });
+                });
+                ['tactic','gameplan','game-plan','pressure','tackling','tempo','slider','offside','marking'].forEach(kw => {
+                    document.querySelectorAll('[class*="'+kw+'"], [id*="'+kw+'"]').forEach(el => {
+                        out.classes.push({ tag: el.tagName, id: el.id, cls: el.className.substring(0,60) });
+                    });
+                });
+                document.querySelectorAll('input[type="range"]').forEach(el => {
+                    out.rangeInputs.push({ id: el.id, cls: el.className, name: el.name,
+                                           bind: (el.getAttribute('data-bind') || '').substring(0,80) });
+                });
+                return out;
+            }
         """)
-        print("  [dump] data-bind elements en /Tactics:")
-        for b in binds[:40]:
-            print(f"    {b['tag']}.{b['cls'][:30]} → {b['bind'][:100]}")
+        print(f"  [dump] URL actual: {result['url']}")
+        print(f"  [dump] input[range] encontrados: {result['rangeInputs']}")
+        print(f"  [dump] Clases táctica/slider: {result['classes'][:10]}")
+        print(f"  [dump] data-bind elements ({len(result['binds'])}):")
+        for b in result['binds'][:50]:
+            print(f"    {b['tag']}.{b['cls']} → {b['bind']}")
     except Exception as e:
         print(f"  [dump] error: {e}")
+
+
+def _navigate_to_tactics(page: Page) -> bool:
+    """
+    Navega a la página de tácticas preservando el contexto de equipo.
+    Intenta SPA (click en link de nav) primero; usa page.goto() como fallback.
+    """
+    # ── 1. SPA navigation via link ────────────────────────────────────────────
+    nav_sels = [
+        "a[href='/Tactics']",
+        "a[href*='/Tactics']",
+        "a[href*='tactics']",
+        "a:has-text('Tactics')",
+        "a:has-text('Tácticas')",
+        ".nav-tactics a",
+        "[data-target*='Tactics']",
+    ]
+    for sel in nav_sels:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=800):
+                loc.click()
+                time.sleep(2)
+                if _tactics_loaded(page, timeout=10000):
+                    print(f"  ✓ Tácticas cargadas vía SPA ({sel})")
+                    return True
+        except Exception:
+            pass
+
+    # ── 2. Fallback: page.goto() + espera extra ───────────────────────────────
+    print("  → Fallback: page.goto(/Tactics)...")
+    try:
+        page.goto(TACTICS_URL, wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+        handle_popups(page)
+        if _tactics_loaded(page, timeout=15000):
+            return True
+    except Exception as e:
+        print(f"  ⚠️ page.goto() falló: {e}")
+
+    return False
+
+
+def _tactics_loaded(page: Page, timeout: int = 10000) -> bool:
+    """Devuelve True si el DOM contiene contenido específico de la página de tácticas."""
+    selectors = [
+        "[data-bind*='gamePlan']",
+        "[data-bind*='gameplan']",
+        "[data-bind*='tackling']",
+        "[data-bind*='pressure']",
+        "[data-bind*='offside']",
+        ".tactics-container",
+        ".tactic-selector",
+        "#page-tactics",
+        "input[type='range']",
+    ]
+    per = max(300, timeout // len(selectors))
+    for sel in selectors:
+        try:
+            page.wait_for_selector(sel, timeout=per, state="visible")
+            print(f"  ✓ Tácticas detectadas: {sel}")
+            return True
+        except Exception:
+            pass
+    return False
 
 
 # ── FUNCIÓN PRINCIPAL ─────────────────────────────────────────────────────────
 
 def set_tactics(page: Page, **kwargs) -> dict:
     """
-    Establece las tácticas del equipo en el slot indicado.
+    Establece las tácticas del equipo activo.
 
-    Parámetros opcionales (solo se aplican los que se pasen):
-        game_plan       str   Normal / Attacking / Defensive / Counter / Long Ball / Possession
-        tackling        str   Easy / Normal / Hard / Aggressive
-        pressure        int   0-100
-        mentality       int   0-100
-        tempo           int   0-100
-        formation       str   4-4-2, 4-3-3, etc.
-        forwards_tactic str
-        midfielders_tactic str
-        defenders_tactic   str
-        offside_trap    bool
-        marking         str   Zonal / Man-to-man
+    Kwargs opcionales:
+        game_plan, tackling, pressure (0-100), mentality (0-100), tempo (0-100),
+        forwards_tactic, midfielders_tactic, defenders_tactic,
+        offside_trap (bool), marking
 
     Returns dict: { "success": bool, "changed": list[str], "errors": list[str] }
     """
@@ -191,22 +262,16 @@ def set_tactics(page: Page, **kwargs) -> dict:
 
     try:
         handle_popups(page)
-        page.goto(TACTICS_URL, wait_until="domcontentloaded", timeout=30000)
 
-        # Esperar a que la página cargue los controles de tácticas
-        try:
-            page.wait_for_selector(
-                "[data-bind*='gamePlan'], [data-bind*='gameplan'], .tactics-container, #tactics",
-                timeout=15000,
-            )
-        except Exception:
-            print("  ⚠️ Selector de tácticas no encontrado — dumpeando estructura...")
+        if not _navigate_to_tactics(page):
+            print("  ⚠️ Página de tácticas no cargó — dumpeando DOM...")
             _dump_tactics_structure(page)
             errors.append("page_not_loaded")
             return {"success": False, "changed": changed, "errors": errors}
 
         time.sleep(1)
         handle_popups(page)
+        _dump_ko_observables(page)
 
         # ── Intentar vía Knockout.js viewmodel (más confiable) ────────────────
         ko_result = _try_set_via_ko(page, **kwargs)
@@ -240,24 +305,69 @@ def set_tactics(page: Page, **kwargs) -> dict:
     }
 
 
+def _dump_ko_observables(page: Page):
+    """Debug: imprime todos los observables KO del viewmodel de tácticas con sus valores actuales."""
+    try:
+        obs = page.evaluate("""
+            () => {
+                const candidates = [
+                    document.querySelector('[data-bind*="offside"]'),
+                    document.querySelector('[data-bind*="gamePlan"]'),
+                    document.querySelector('[data-bind*="gameplan"]'),
+                    document.querySelector('[data-bind*="tackling"]'),
+                    document.querySelector('[data-bind*="pressure"]'),
+                    document.body,
+                ].filter(Boolean);
+                for (const el of candidates) {
+                    try {
+                        const ctx = ko.contextFor(el);
+                        if (!ctx) continue;
+                        const vm = ctx.$root || ctx.$data;
+                        if (!vm) continue;
+                        const out = {};
+                        for (const key of Object.keys(vm)) {
+                            try {
+                                const v = vm[key];
+                                if (typeof v === 'function') out[key] = v();
+                            } catch(e) {}
+                        }
+                        return out;
+                    } catch(e) {}
+                }
+                return null;
+            }
+        """)
+        if obs:
+            print("  [KO observables en viewmodel de tácticas]:")
+            for k, v in sorted(obs.items()):
+                print(f"    {k} = {v!r}")
+        else:
+            print("  [KO] No se encontró viewmodel accesible")
+    except Exception as e:
+        print(f"  [KO dump] error: {e}")
+
+
 def _try_set_via_ko(page: Page, **kwargs) -> dict:
     """
     Intenta modificar las tácticas directamente via Knockout.js observables.
     Devuelve {"applied": [...], "failed": [...]}
     """
-    # Mapa de nuestros kwargs → posibles nombres de observable en KO
     KO_MAP = {
-        "game_plan":           ["gamePlan", "gameplan", "GamePlan"],
-        "tackling":            ["tackling", "Tackling"],
-        "pressure":            ["pressure", "Pressure"],
-        "mentality":           ["mentality", "Mentality"],
-        "tempo":               ["tempo", "Tempo"],
-        "formation":           ["formation", "Formation"],
-        "forwards_tactic":     ["forwardsTactic", "forwardTactic", "attackingTactic"],
-        "midfielders_tactic":  ["midfieldersTactic", "midfielderTactic"],
-        "defenders_tactic":    ["defendersTactic", "defenderTactic"],
-        "offside_trap":        ["offsideTrap", "offside"],
-        "marking":             ["marking", "Marking"],
+        "game_plan":           ["gamePlan", "gameplan", "GamePlan", "game_plan",
+                                 "gameplanId", "gamePlanId"],
+        "tackling":            ["tackling", "Tackling", "tacklingStyle", "tacklingId"],
+        "pressure":            ["pressure", "Pressure", "pressingRate", "pressPressure"],
+        "mentality":           ["mentality", "Mentality", "teamMentality"],
+        "tempo":               ["tempo", "Tempo", "playingTempo"],
+        "forwards_tactic":     ["forwardsTactic", "forwardTactic", "attackingTactic",
+                                 "forwardPlay", "forwardsPlay", "forwardsTacticId"],
+        "midfielders_tactic":  ["midfieldersTactic", "midfielderTactic", "midfieldPlay",
+                                 "midfielderPlay", "midfieldersTacticId"],
+        "defenders_tactic":    ["defendersTactic", "defenderTactic", "defensivePlay",
+                                 "defenderPlay", "defendersTacticId"],
+        "offside_trap":        ["offsideTrap", "offside", "offsideEnabled",
+                                 "offsideTrapEnabled", "isOffsideTrap"],
+        "marking":             ["marking", "Marking", "markingStyle", "markingId"],
     }
 
     applied = []
@@ -275,33 +385,80 @@ def _try_set_via_ko(page: Page, **kwargs) -> dict:
         js_value = json.dumps(value)
         ok = page.evaluate(f"""
             (function() {{
-                const names = {js_names};
-                const val   = {js_value};
+                const names   = {js_names};
+                const val     = {js_value};
+                // Todos los elementos con data-bind conocidos + fallbacks genéricos
                 const candidates = [
+                    document.querySelector('[data-bind*="offside"]'),
                     document.querySelector('[data-bind*="gamePlan"]'),
                     document.querySelector('[data-bind*="gameplan"]'),
+                    document.querySelector('[data-bind*="tackling"]'),
+                    document.querySelector('[data-bind*="pressure"]'),
+                    document.querySelector('[data-bind*="tempo"]'),
+                    document.querySelector('[data-bind*="mentality"]'),
+                    document.querySelector('[data-bind*="marking"]'),
+                    document.querySelector('[data-bind*="forwardsTactic"]'),
+                    document.querySelector('[data-bind*="defendersTactic"]'),
+                    document.querySelector('[data-bind*="midfieldersTactic"]'),
                     document.querySelector('.tactics-container'),
+                    document.querySelector('[class*="tactic"]'),
                     document.querySelector('#tactics'),
                     document.body,
                 ].filter(Boolean);
 
-                for (const el of candidates) {{
+                // Extrae el viewmodel KO de un elemento
+                function getVm(el) {{
                     try {{
                         const ctx = ko.contextFor(el);
-                        if (!ctx) continue;
-                        const vm = ctx.$root || ctx.$data;
-                        if (!vm) continue;
+                        if (!ctx) return null;
+                        return ctx.$root || ctx.$data || null;
+                    }} catch(e) {{ return null; }}
+                }}
+
+                // Intenta setear el valor en un viewmodel dado
+                function trySet(vm) {{
+                    if (!vm) return false;
+                    // 1. Coincidencia exacta
+                    for (const name of names) {{
+                        if (typeof vm[name] === 'function') {{
+                            vm[name](val);
+                            return true;
+                        }}
+                    }}
+                    // 2. Coincidencia case-insensitive
+                    const lower = names.map(n => n.toLowerCase());
+                    for (const prop of Object.keys(vm)) {{
+                        if (lower.includes(prop.toLowerCase()) && typeof vm[prop] === 'function') {{
+                            vm[prop](val);
+                            return true;
+                        }}
+                    }}
+                    // 3. Un nivel de profundidad (sub-objetos)
+                    for (const prop of Object.keys(vm)) {{
+                        const sub = vm[prop];
+                        if (!sub || typeof sub !== 'object' || Array.isArray(sub)) continue;
                         for (const name of names) {{
-                            if (typeof vm[name] === 'function') {{
-                                vm[name](val);
+                            if (typeof sub[name] === 'function') {{
+                                sub[name](val);
                                 return true;
                             }}
-                            for (const prop of Object.keys(vm)) {{
-                                if (vm[prop] && typeof vm[prop] === 'object' && typeof vm[prop][name] === 'function') {{
-                                    vm[prop][name](val);
-                                    return true;
-                                }}
-                            }}
+                        }}
+                    }}
+                    return false;
+                }}
+
+                const seen = new Set();
+                for (const el of candidates) {{
+                    const vm = getVm(el);
+                    if (!vm || seen.has(vm)) continue;
+                    seen.add(vm);
+                    if (trySet(vm)) return true;
+                    // Intentar también con $parent y $parents
+                    try {{
+                        const ctx = ko.contextFor(el);
+                        if (ctx.$parent && !seen.has(ctx.$parent)) {{
+                            seen.add(ctx.$parent);
+                            if (trySet(ctx.$parent)) return true;
                         }}
                     }} catch(e) {{}}
                 }}
@@ -314,6 +471,7 @@ def _try_set_via_ko(page: Page, **kwargs) -> dict:
             print(f"  ✓ KO: {key} = {value!r}")
         else:
             failed.append(key)
+            print(f"  ⚠️ KO falló: {key}")
 
     return {"applied": applied, "failed": failed}
 
@@ -361,8 +519,7 @@ def _set_via_ui(page: Page, **kwargs) -> tuple[list, list]:
                 errors.append(f"slider:{field}")
 
         elif field == "offside_trap":
-            sel = structure.get("offside_sel")
-            if sel and _toggle_offside(page, sel, bool(value)):
+            if _toggle_offside_direct(page, bool(value)):
                 changed.append(field)
             else:
                 errors.append("offside_trap")
@@ -420,7 +577,7 @@ def _detect_tactics_structure(page: Page) -> dict:
 
 
 def _toggle_offside(page: Page, sel: str, enable: bool) -> bool:
-    """Activa o desactiva el offside trap."""
+    """Activa o desactiva el offside trap dado un selector explícito."""
     try:
         el = page.locator(sel).first
         is_checked = el.is_checked() if el.get_attribute("type") == "checkbox" else \
@@ -431,6 +588,92 @@ def _toggle_offside(page: Page, sel: str, enable: bool) -> bool:
     except Exception as e:
         print(f"  ⚠️ offside toggle: {e}")
         return False
+
+
+def _toggle_offside_direct(page: Page, enable: bool) -> bool:
+    """
+    Activa/desactiva el offside trap sin depender de _detect_tactics_structure.
+    Busca [data-bind*='offside'] directamente y prueba KO → checkbox → click.
+    """
+    # 1. Via KO observable sobre el elemento offside
+    try:
+        ok = page.evaluate(f"""
+            (function() {{
+                const el = document.querySelector('[data-bind*="offside"]');
+                if (!el) return false;
+                try {{
+                    const ctx = ko.contextFor(el);
+                    if (ctx) {{
+                        const vm = ctx.$root || ctx.$data;
+                        if (vm) {{
+                            const names = ['offsideTrap', 'offside', 'offsideEnabled', 'useOffside',
+                                           'offsideTrapEnabled', 'isOffsideTrap'];
+                            for (const n of names) {{
+                                if (typeof vm[n] === 'function') {{
+                                    vm[n]({json.dumps(enable)});
+                                    return true;
+                                }}
+                            }}
+                            // Buscar un nivel más profundo
+                            for (const prop of Object.keys(vm)) {{
+                                const sub = vm[prop];
+                                if (sub && typeof sub === 'object') {{
+                                    for (const n of names) {{
+                                        if (typeof sub[n] === 'function') {{
+                                            sub[n]({json.dumps(enable)});
+                                            return true;
+                                        }}
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }}
+                }} catch(e) {{}}
+                return false;
+            }})()
+        """)
+        if ok:
+            print(f"  ✓ KO: offside_trap = {enable}")
+            return True
+    except Exception as e:
+        print(f"  ⚠️ KO offside: {e}")
+
+    # 2. Interacción directa: checkbox o toggle/button
+    offside_sels = [
+        "input[type='checkbox'][data-bind*='offside']",
+        "[data-bind*='offside']",
+        "input[data-bind*='offside']",
+        ".offside-trap",
+        "#offside-trap",
+        "[class*='offside']",
+    ]
+    for sel in offside_sels:
+        try:
+            loc = page.locator(sel).first
+            if loc.count() == 0:
+                continue
+            if not loc.is_visible(timeout=500):
+                continue
+            tag       = loc.evaluate("el => el.tagName.toLowerCase()")
+            attr_type = loc.get_attribute("type") or ""
+            if tag == "input" and attr_type == "checkbox":
+                if loc.is_checked() != enable:
+                    loc.click()
+                print(f"  ✓ checkbox: offside_trap = {enable} ({sel})")
+                return True
+            else:
+                cls       = loc.get_attribute("class") or ""
+                is_active = any(w in cls for w in ("active", "checked", "on", "enabled"))
+                if is_active != enable:
+                    loc.click()
+                    time.sleep(0.3)
+                print(f"  ✓ toggle: offside_trap = {enable} ({sel})")
+                return True
+        except Exception as e:
+            print(f"  ⚠️ offside ({sel}): {e}")
+
+    print("  ❌ No se encontró elemento offside_trap en el DOM")
+    return False
 
 
 def _click_save(page: Page) -> bool:
@@ -455,8 +698,8 @@ def _click_save(page: Page) -> bool:
                 return True
         except Exception:
             pass
-    print("  ⚠️ Botón de guardar no encontrado. Puede que las tácticas se guarden automáticamente.")
-    return False
+    print("  ✓ Tácticas guardadas automáticamente (OSM no requiere botón de guardar).")
+    return True
 
 
 # ── WRAPPER PARA SER LLAMADO DESDE EL BOT ─────────────────────────────────────

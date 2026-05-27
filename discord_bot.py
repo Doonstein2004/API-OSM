@@ -664,35 +664,40 @@ async def _slot_autocomplete(
 
 
 _GAMEPLAN_CHOICES = [
-    app_commands.Choice(name="Normal",     value="Normal"),
-    app_commands.Choice(name="Attacking",  value="Attacking"),
-    app_commands.Choice(name="Defensive",  value="Defensive"),
-    app_commands.Choice(name="Counter",    value="Counter"),
-    app_commands.Choice(name="Long Ball",  value="Long Ball"),
-    app_commands.Choice(name="Possession", value="Possession"),
+    app_commands.Choice(name="Shoot on sight", value="Shoot on sight"),
+    app_commands.Choice(name="Long ball",       value="Long ball"),
+    app_commands.Choice(name="Counter-attack",  value="Counter-attack"),
+    app_commands.Choice(name="Wing play",       value="Wing play"),
+    app_commands.Choice(name="Passing game",    value="Passing game"),
 ]
 _TACKLING_CHOICES = [
-    app_commands.Choice(name="Easy",       value="Easy"),
+    app_commands.Choice(name="Careful",    value="Careful"),
     app_commands.Choice(name="Normal",     value="Normal"),
-    app_commands.Choice(name="Hard",       value="Hard"),
+    app_commands.Choice(name="Reckless",   value="Reckless"),
     app_commands.Choice(name="Aggressive", value="Aggressive"),
 ]
 _MARKING_CHOICES = [
-    app_commands.Choice(name="Zonal",      value="Zonal"),
-    app_commands.Choice(name="Man-to-man", value="Man-to-man"),
+    app_commands.Choice(name="Zonal marking", value="Zonal marking"),
+    app_commands.Choice(name="Man marking",   value="Man marking"),
 ]
-_FORMATION_CHOICES = [
-    app_commands.Choice(name="4-4-2",   value="4-4-2"),
-    app_commands.Choice(name="4-3-3",   value="4-3-3"),
-    app_commands.Choice(name="4-5-1",   value="4-5-1"),
-    app_commands.Choice(name="3-5-2",   value="3-5-2"),
-    app_commands.Choice(name="5-3-2",   value="5-3-2"),
-    app_commands.Choice(name="4-2-3-1", value="4-2-3-1"),
-    app_commands.Choice(name="4-1-4-1", value="4-1-4-1"),
-    app_commands.Choice(name="3-4-3",   value="3-4-3"),
-    app_commands.Choice(name="5-4-1",   value="5-4-1"),
-    app_commands.Choice(name="4-4-1-1", value="4-4-1-1"),
-    app_commands.Choice(name="3-6-1",   value="3-6-1"),
+_FWD_TACTIC_CHOICES = [
+    app_commands.Choice(name="Attack only",      value="Attack only"),
+    app_commands.Choice(name="Support midfield", value="Support midfield"),
+    app_commands.Choice(name="Drop deep",        value="Drop deep"),
+]
+_MID_TACTIC_CHOICES = [
+    app_commands.Choice(name="Protect the defence", value="Protect the defence"),
+    app_commands.Choice(name="Push forward",        value="Push forward"),
+    app_commands.Choice(name="Stay in position",    value="Stay in position"),
+]
+_DEF_TACTIC_CHOICES = [
+    app_commands.Choice(name="Defend deep",          value="Defend deep"),
+    app_commands.Choice(name="Attacking full-backs",  value="Attacking full-backs"),
+    app_commands.Choice(name="Support midfield",      value="Support midfield"),
+]
+_OFFSIDE_CHOICES = [
+    app_commands.Choice(name="Yes", value="Yes"),
+    app_commands.Choice(name="No",  value="No"),
 ]
 
 
@@ -811,32 +816,41 @@ async def cmd_fichajes(interaction: discord.Interaction, slot: str = "0"):
 
 @tree.command(name="settactics", description="Cambia las tácticas de un equipo (abre navegador ~30s)")
 @app_commands.describe(
-    slot      = "Selecciona tu equipo",
-    gameplan  = "Plan de juego",
-    tackling  = "Tipo de entrada",
-    formation = "Formación",
-    pressure  = "Presión (0-100)",
-    mentality = "Mentalidad (0-100)",
-    tempo     = "Tempo (0-100)",
-    marking   = "Marcaje",
+    slot       = "Selecciona tu equipo",
+    gameplan   = "Plan de juego",
+    tackling   = "Tipo de entrada",
+    pressure   = "Presión (0-100)",
+    mentality  = "Mentalidad (0-100)",
+    tempo      = "Tempo (0-100)",
+    marking    = "Marcaje",
+    fwd        = "Táctica de delanteros",
+    mid        = "Táctica de mediocampistas",
+    defenders  = "Táctica de defensas",
+    offside    = "Trampa del offside",
 )
 @app_commands.autocomplete(slot=_slot_autocomplete)
 @app_commands.choices(
-    gameplan  = _GAMEPLAN_CHOICES,
-    tackling  = _TACKLING_CHOICES,
-    formation = _FORMATION_CHOICES,
-    marking   = _MARKING_CHOICES,
+    gameplan = _GAMEPLAN_CHOICES,
+    tackling = _TACKLING_CHOICES,
+    marking  = _MARKING_CHOICES,
+    fwd      = _FWD_TACTIC_CHOICES,
+    mid      = _MID_TACTIC_CHOICES,
+    defenders = _DEF_TACTIC_CHOICES,
+    offside   = _OFFSIDE_CHOICES,
 )
 async def cmd_settactics(
     interaction : discord.Interaction,
     slot        : str           = "0",
     gameplan    : Optional[str] = None,
     tackling    : Optional[str] = None,
-    formation   : Optional[str] = None,
     pressure    : Optional[int] = None,
     mentality   : Optional[int] = None,
     tempo       : Optional[int] = None,
     marking     : Optional[str] = None,
+    fwd         : Optional[str] = None,
+    mid         : Optional[str] = None,
+    defenders   : Optional[str] = None,
+    offside     : Optional[str] = None,
 ):
     if not _is_owner(interaction):
         await interaction.response.send_message("No autorizado.", ephemeral=True)
@@ -856,13 +870,16 @@ async def cmd_settactics(
             return
 
     kwargs: dict = {}
-    if gameplan:              kwargs["game_plan"] = gameplan
-    if tackling:              kwargs["tackling"]  = tackling
-    if formation:             kwargs["formation"] = formation
-    if pressure  is not None: kwargs["pressure"]  = pressure
-    if mentality is not None: kwargs["mentality"] = mentality
-    if tempo     is not None: kwargs["tempo"]     = tempo
-    if marking:               kwargs["marking"]   = marking
+    if gameplan:              kwargs["game_plan"]           = gameplan
+    if tackling:              kwargs["tackling"]            = tackling
+    if pressure  is not None: kwargs["pressure"]            = pressure
+    if mentality is not None: kwargs["mentality"]           = mentality
+    if tempo     is not None: kwargs["tempo"]               = tempo
+    if marking:               kwargs["marking"]             = marking
+    if fwd:                   kwargs["forwards_tactic"]     = fwd
+    if mid:                   kwargs["midfielders_tactic"]  = mid
+    if defenders:             kwargs["defenders_tactic"]    = defenders
+    if offside:               kwargs["offside_trap"]        = (offside == "Yes")
 
     if not kwargs:
         await interaction.response.send_message(
@@ -882,10 +899,22 @@ async def cmd_settactics(
         return
 
     _LABEL_ES = {
-        "game_plan": "Plan de juego", "tackling": "Tackling", "formation": "Formación",
-        "pressure": "Presión", "mentality": "Mentalidad", "tempo": "Tempo", "marking": "Marcaje",
+        "game_plan":          "Plan de juego",
+        "tackling":           "Tackling",
+        "pressure":           "Presión",
+        "mentality":          "Mentalidad",
+        "tempo":              "Tempo",
+        "marking":            "Marcaje",
+        "forwards_tactic":    "Delanteros",
+        "midfielders_tactic": "Mediocampistas",
+        "defenders_tactic":   "Defensas",
+        "offside_trap":       "Offside trap",
     }
-    lines = [f"• **{_LABEL_ES.get(k, k)}**: `{v}`" for k, v in kwargs.items()]
+    def _fmt_v(v) -> str:
+        if isinstance(v, bool):
+            return "Sí" if v else "No"
+        return str(v)
+    lines = [f"• **{_LABEL_ES.get(k, k)}**: `{_fmt_v(v)}`" for k, v in kwargs.items()]
     embed = discord.Embed(
         title       = f"⚙️ Cambiar Tácticas — {slot_name}",
         description = "¿Confirmas los siguientes cambios?\n\n" + "\n".join(lines),
