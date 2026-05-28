@@ -202,7 +202,7 @@ def _scrape_timers_sync(user_id: str) -> list[dict]:
         conn.close()
 
 
-def _scrape_settactics_sync(user_id: str, slot_index: int, kwargs: dict) -> dict:
+def _scrape_settactics_sync(user_id: str, league_name: str, kwargs: dict) -> dict:
     from playwright.sync_api import sync_playwright
     from utils import login_with_session_cache, launch_playwright_browser
     from action_set_tactics import set_tactics_for_slot
@@ -216,13 +216,38 @@ def _scrape_settactics_sync(user_id: str, slot_index: int, kwargs: dict) -> dict
         with sync_playwright() as p:
             browser = launch_playwright_browser(p, headless=True)
             context, page = login_with_session_cache(browser, conn, user_id, username, password)
-            result = set_tactics_for_slot(page, slot_index, **kwargs)
+            result = set_tactics_for_slot(page, league_name, **kwargs)
             context.close()
             browser.close()
             return result
     except Exception as e:
         print(f"❌ Error en scrape de tácticas: {e}")
         return {"success": False, "changed": [], "errors": [str(e)]}
+    finally:
+        conn.close()
+
+
+def _scrape_setlineup_sync(user_id: str, league_name: str, formation: str) -> dict:
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_lineup import set_lineup_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"success": False, "formation": formation, "errors": ["no_credentials"]}
+
+    conn = _db()
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            result = set_lineup_for_slot(page, league_name, formation)
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        print(f"❌ Error en scrape de lineup: {e}")
+        return {"success": False, "formation": formation, "errors": [str(e)]}
     finally:
         conn.close()
 
@@ -607,10 +632,10 @@ class SlotDetailView(discord.ui.View):
 
 
 class TacticsConfirmView(discord.ui.View):
-    def __init__(self, slot_index: int, kwargs: dict):
+    def __init__(self, league_name: str, kwargs: dict):
         super().__init__(timeout=60)
-        self.slot_index = slot_index
-        self.kwargs     = kwargs
+        self.league_name = league_name
+        self.kwargs      = kwargs
 
     @discord.ui.button(label="✅ Confirmar", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
@@ -619,7 +644,7 @@ class TacticsConfirmView(discord.ui.View):
             return
         await interaction.response.defer(thinking=True)
         result = await asyncio.to_thread(
-            _scrape_settactics_sync, OSM_USER_ID, self.slot_index, self.kwargs
+            _scrape_settactics_sync, OSM_USER_ID, self.league_name, self.kwargs
         )
         self.stop()
         if result["success"]:
@@ -631,6 +656,39 @@ class TacticsConfirmView(discord.ui.View):
             await interaction.followup.send(
                 f"⚠️ Aplicados: **{changed}**\nErrores: `{errors}`\n"
                 "Revisa los logs o usa `/tactics` para verificar el estado actual.",
+                ephemeral=True,
+            )
+
+    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_message("Cancelado.", ephemeral=True)
+        self.stop()
+
+
+class LineupConfirmView(discord.ui.View):
+    def __init__(self, league_name: str, formation: str):
+        super().__init__(timeout=60)
+        self.league_name = league_name
+        self.formation   = formation
+
+    @discord.ui.button(label="✅ Confirmar", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if not _is_owner(interaction):
+            await interaction.response.send_message("No autorizado.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        result = await asyncio.to_thread(
+            _scrape_setlineup_sync, OSM_USER_ID, self.league_name, self.formation
+        )
+        self.stop()
+        if result["success"]:
+            await interaction.followup.send(
+                f"✅ Formación aplicada: **{result['formation']}**", ephemeral=True
+            )
+        else:
+            errors = ", ".join(result["errors"])
+            await interaction.followup.send(
+                f"⚠️ No se pudo aplicar la formación.\nErrores: `{errors}`",
                 ephemeral=True,
             )
 
@@ -922,7 +980,59 @@ async def cmd_settactics(
     )
     await interaction.response.send_message(
         embed     = embed,
-        view      = TacticsConfirmView(slot_index=idx, kwargs=kwargs),
+        view      = TacticsConfirmView(league_name=slot_name, kwargs=kwargs),
+        ephemeral = True,
+    )
+
+
+_FORMATION_CHOICES = [
+    app_commands.Choice(name=f, value=f)
+    for f in [
+        "4-3-3 A", "4-3-3 B", "4-5-1",   "4-2-3-1",
+        "4-4-2 A", "4-4-2 B", "3-2-5",   "3-2-3-2",
+        "3-3-4 A", "3-3-4 B", "3-4-3 A", "3-4-3 B",
+        "3-3-2-2", "3-5-2",   "4-2-4 A", "4-2-4 B",
+        "5-2-3 A", "5-2-3 B", "5-3-2",   "5-3-1-1",
+        "5-4-1 A", "5-4-1 B", "6-3-1 A", "6-3-1 B",
+    ]
+]
+
+
+@tree.command(name="setlineup", description="Cambia la formación de un equipo (~30s)")
+@app_commands.describe(
+    slot      = "Selecciona tu equipo",
+    formation = "Formación a aplicar",
+)
+@app_commands.autocomplete(slot=_slot_autocomplete)
+@app_commands.choices(formation=_FORMATION_CHOICES)
+async def cmd_setlineup(
+    interaction: discord.Interaction,
+    slot:        str,
+    formation:   str,
+):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    try:
+        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx       = _slot_idx(slot, leagues)
+        slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
+    except Exception:
+        idx, slot_name = 0, "Equipo"
+
+    if idx is None:
+        await interaction.response.send_message("Equipo no encontrado.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title       = f"🗂️ Cambiar Formación — {slot_name}",
+        description = f"¿Confirmas cambiar la formación a **{formation}**?",
+        color       = OSM_COLOR,
+    )
+    await interaction.response.send_message(
+        embed = embed,
+        view  = LineupConfirmView(league_name=slot_name, formation=formation),
         ephemeral = True,
     )
 

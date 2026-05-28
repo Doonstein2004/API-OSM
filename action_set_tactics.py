@@ -10,13 +10,110 @@ from utils import handle_popups
 
 TACTICS_URL = "https://en.onlinesoccermanager.com/Tactics"
 
-# Valores válidos para cada campo (deben coincidir con el texto visible en OSM)
+# Valores válidos para cada campo (texto visible en OSM)
 VALID_GAME_PLANS  = ["Shoot on sight", "Long ball", "Counter-attack", "Wing play", "Passing game"]
 VALID_TACKLING    = ["Careful", "Normal", "Reckless", "Aggressive"]
 VALID_MARKING     = ["Zonal marking", "Man marking"]
 VALID_FWD_TACTICS = ["Attack only", "Support midfield", "Drop deep"]
 VALID_MID_TACTICS = ["Protect the defence", "Push forward", "Stay in position"]
 VALID_DEF_TACTICS = ["Defend deep", "Attacking full-backs", "Support midfield"]
+
+# Conversión de texto Discord → índice entero del carousel de OSM
+# Índices confirmados vía data-enumtranslationN en el HTML de /Tactics
+_TO_OSM_VALUE: dict[str, dict] = {
+    "game_plan": {               # #carousel-tacticoverall
+        "long ball":      0,
+        "passing game":   1,
+        "wing play":      2,
+        "counter-attack": 3,
+        "shoot on sight": 4,
+    },
+    "tackling": {                # #carousel-tacticstyleofplay
+        "careful":    0,
+        "normal":     1,
+        "aggressive": 2,
+        "reckless":   3,
+    },
+    "forwards_tactic": {         # #carousel-tacticlineatt
+        "drop deep":        0,
+        "support midfield": 1,
+        "attack only":      2,
+    },
+    "midfielders_tactic": {      # #carousel-tacticlinemid
+        "protect the defence": 0,
+        "stay in position":    1,
+        "push forward":        2,
+    },
+    "defenders_tactic": {        # #carousel-tacticlinedef
+        "defend deep":          0,
+        "attacking full-backs": 1,
+        "support midfield":     2,
+    },
+    "marking": {                 # #carousel-tacticmarking
+        "zonal marking": 0,
+        "man marking":   1,
+    },
+    "offside_trap": {            # #carousel-tacticoffsidetrap
+        False: 0, True: 1,
+        "no": 0, "yes": 1, "false": 0, "true": 1,
+    },
+}
+
+# Propiedad del viewmodel KO para cada campo — cada una es un objeto con .sliderValue()
+_KO_TACTIC_PROP = {
+    "game_plan":          "tacticOverall",
+    "tackling":           "tacticStyleOfPlay",
+    "pressure":           "tacticPressure",
+    "mentality":          "tacticMentality",
+    "tempo":              "tacticTempo",
+    "forwards_tactic":    "tacticLineAtt",
+    "midfielders_tactic": "tacticLineMid",
+    "defenders_tactic":   "tacticLineDef",
+    "offside_trap":       "tacticOffsideTrap",
+    "marking":            "tacticMarking",
+}
+
+# IDs exactos de los carousels en el DOM de /Tactics
+_CAROUSEL_ID = {
+    "game_plan":          "carousel-tacticoverall",
+    "tackling":           "carousel-tacticstyleofplay",
+    "forwards_tactic":    "carousel-tacticlineatt",
+    "midfielders_tactic": "carousel-tacticlinemid",
+    "defenders_tactic":   "carousel-tacticlinedef",
+    "offside_trap":       "carousel-tacticoffsidetrap",
+    "marking":            "carousel-tacticmarking",
+}
+
+# Alias heredado — usado sólo en _try_set_via_ko capa 2 (objeto tactic de nextRoundPartial)
+_KO_FIELD_MAP = {
+    "game_plan":          "style",
+    "tackling":           "overallMatchTactics",
+    "pressure":           "pressing",
+    "mentality":          "mentality",
+    "tempo":              "tempo",
+    "forwards_tactic":    "attack",
+    "midfielders_tactic": "midfield",
+    "defenders_tactic":   "defense",
+    "offside_trap":       "offsideTrap",
+    "marking":            "marking",
+}
+
+
+def _to_osm(field: str, value) -> tuple:
+    """
+    Convierte un valor de Discord al índice entero del carousel de OSM.
+    Devuelve (osm_int_or_num, original_string) — el primer elemento es lo que
+    se pasa al KO observable (.sliderValue) o al input de slider.
+    """
+    mapping = _TO_OSM_VALUE.get(field)
+    if mapping is not None:
+        # Para offside_trap que acepta bool directamente
+        key = value if isinstance(value, bool) else str(value).lower().strip()
+        converted = mapping.get(key)
+        if converted is not None:
+            return converted, value
+    # Numérico (pressure/mentality/tempo) — devolver tal cual
+    return value, value
 
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -277,14 +374,23 @@ def set_tactics(page: Page, **kwargs) -> dict:
         ko_result = _try_set_via_ko(page, **kwargs)
         if ko_result["applied"]:
             changed.extend(ko_result["applied"])
-            # Si KO aplicó todos los cambios, solo necesitamos guardar
+
+            # Verificar que los valores quedaron escritos correctamente
+            time.sleep(0.5)
+            verify = _verify_ko_state(page, kwargs)
+            save_methods = verify.get("save_methods", [])
+
+            # Si KO aplicó todos los cambios, forzar save y retornar
             if not ko_result["failed"]:
-                _click_save(page)
+                _force_save(page, vm_save_methods=save_methods)
+                time.sleep(2)  # esperar que el auto-save debounce dispare
                 return {"success": True, "changed": changed, "errors": []}
+
             # Si KO falló en algunos, intentar esos por UI
             kwargs_remaining = {k: v for k, v in kwargs.items() if k in ko_result["failed"]}
         else:
             kwargs_remaining = kwargs
+            save_methods = []
 
         # ── Fallback: navegación por UI (carousels + sliders) ─────────────────
         ui_changed, ui_errors = _set_via_ui(page, **kwargs_remaining)
@@ -292,7 +398,8 @@ def set_tactics(page: Page, **kwargs) -> dict:
         errors.extend(ui_errors)
 
         if changed:
-            _click_save(page)
+            _force_save(page, vm_save_methods=save_methods)
+            time.sleep(2)
 
     except Exception as e:
         print(f"  ❌ Error en set_tactics: {e}")
@@ -306,216 +413,256 @@ def set_tactics(page: Page, **kwargs) -> dict:
 
 
 def _dump_ko_observables(page: Page):
-    """Debug: imprime todos los observables KO del viewmodel de tácticas con sus valores actuales."""
+    """Debug: muestra el objeto tactic del equipo propio + elementos interactivos de la página."""
     try:
-        obs = page.evaluate("""
+        data = page.evaluate("""
             () => {
-                const candidates = [
-                    document.querySelector('[data-bind*="offside"]'),
-                    document.querySelector('[data-bind*="gamePlan"]'),
-                    document.querySelector('[data-bind*="gameplan"]'),
-                    document.querySelector('[data-bind*="tackling"]'),
-                    document.querySelector('[data-bind*="pressure"]'),
-                    document.body,
-                ].filter(Boolean);
-                for (const el of candidates) {
-                    try {
-                        const ctx = ko.contextFor(el);
-                        if (!ctx) continue;
-                        const vm = ctx.$root || ctx.$data;
-                        if (!vm) continue;
-                        const out = {};
-                        for (const key of Object.keys(vm)) {
-                            try {
-                                const v = vm[key];
-                                if (typeof v === 'function') out[key] = v();
-                            } catch(e) {}
+                const out = { tactic: null, rangeInputs: [], carouselBtns: [], tacticText: [] };
+
+                // 1. Extraer objeto tactic del nextRoundPartial
+                try {
+                    const el = document.querySelector('[data-bind*="offside"]') || document.body;
+                    const ctx = ko.contextFor(el);
+                    const vm  = ctx && (ctx.$root || ctx.$data);
+                    if (vm && typeof vm.nextRoundPartial === 'function') {
+                        const nrp = vm.nextRoundPartial();
+                        if (nrp && nrp.match) {
+                            const teams = [nrp.match.homeTeam, nrp.match.awayTeam].filter(Boolean);
+                            for (const team of teams) {
+                                if (team.tactic) {
+                                    // Serializar: distinguir observables de valores planos
+                                    const t = team.tactic;
+                                    const serialized = {};
+                                    for (const k of Object.keys(t)) {
+                                        try { serialized[k] = typeof t[k] === 'function' ? { obs: true, val: t[k]() } : { obs: false, val: t[k] }; }
+                                        catch(e) { serialized[k] = { obs: false, val: '?' }; }
+                                    }
+                                    out.tactic = { teamId: team.id, name: team.name, fields: serialized };
+                                    break;
+                                }
+                            }
                         }
-                        return out;
-                    } catch(e) {}
-                }
-                return null;
+                    }
+                } catch(e) {}
+
+                // 2. Range inputs (sliders)
+                document.querySelectorAll('input[type="range"]').forEach(el => {
+                    out.rangeInputs.push({
+                        id: el.id, name: el.name, value: el.value,
+                        bind: (el.getAttribute('data-bind') || '').substring(0, 80),
+                        label: el.closest('div,li,tr')?.querySelector('label,span,h4,strong')?.innerText?.trim()?.substring(0, 30) || ''
+                    });
+                });
+
+                // 3. Carousel prev/next buttons
+                document.querySelectorAll('a, button, .clickable').forEach(el => {
+                    if (!el.offsetParent) return;
+                    const cls  = el.className || '';
+                    const text = el.innerText?.trim() || '';
+                    const bind = el.getAttribute('data-bind') || '';
+                    if (/prev|next|left|right|carousel|◄|►|‹|›/.test(cls + text + bind)) {
+                        out.carouselBtns.push({ tag: el.tagName, cls: cls.substring(0, 50), text: text.substring(0, 20), bind: bind.substring(0, 60) });
+                    }
+                });
+
+                // 4. Visible text matching tactic keywords
+                const words = ['passing', 'counter', 'long ball', 'wing', 'shoot', 'careful', 'normal', 'reckless', 'aggressive', 'attack only', 'drop deep', 'support', 'protect', 'push forward'];
+                document.querySelectorAll('span, div, h4, strong, li').forEach(el => {
+                    if (!el.offsetParent) return;
+                    const text = el.innerText?.trim()?.toLowerCase();
+                    if (text && words.some(w => text.includes(w)) && text.length < 60) {
+                        out.tacticText.push({ tag: el.tagName, cls: el.className.substring(0, 40), text: el.innerText.trim().substring(0, 50), bind: (el.getAttribute('data-bind') || '').substring(0, 60) });
+                    }
+                });
+
+                return out;
             }
         """)
-        if obs:
-            print("  [KO observables en viewmodel de tácticas]:")
-            for k, v in sorted(obs.items()):
-                print(f"    {k} = {v!r}")
+
+        if data.get("tactic"):
+            t = data["tactic"]
+            print(f"  [KO tactic] equipo {t['name']} (id {t['teamId']}):")
+            for k, v in t["fields"].items():
+                marker = "obs" if v["obs"] else "   "
+                print(f"    [{marker}] {k} = {v['val']!r}")
         else:
-            print("  [KO] No se encontró viewmodel accesible")
+            print("  [KO] No se encontró objeto tactic en nextRoundPartial")
+
+        if data.get("rangeInputs"):
+            print(f"  [sliders] {len(data['rangeInputs'])} range input(s):")
+            for inp in data["rangeInputs"]:
+                print(f"    id={inp['id']!r} val={inp['value']} label={inp['label']!r} bind={inp['bind']}")
+
+        if data.get("carouselBtns"):
+            print(f"  [carousel btns] {len(data['carouselBtns'])}:")
+            for btn in data["carouselBtns"][:8]:
+                print(f"    {btn['tag']}.{btn['cls'][:30]} text={btn['text']!r}")
+
+        if data.get("tacticText"):
+            print(f"  [tactic text visible] {len(data['tacticText'])}:")
+            for el in data["tacticText"][:8]:
+                print(f"    {el['tag']}: {el['text']!r}  bind={el['bind']}")
+
     except Exception as e:
         print(f"  [KO dump] error: {e}")
 
 
 def _try_set_via_ko(page: Page, **kwargs) -> dict:
     """
-    Intenta modificar las tácticas directamente via Knockout.js observables.
+    Modifica tácticas vía KO. Estrategia:
+      1. vm[tacticProp].sliderValue(val) — patrón real del viewmodel de /Tactics.
+      2. Búsqueda en nextRoundPartial().match.*.tactic como fallback.
     Devuelve {"applied": [...], "failed": [...]}
     """
-    KO_MAP = {
-        "game_plan":           ["gamePlan", "gameplan", "GamePlan", "game_plan",
-                                 "gameplanId", "gamePlanId"],
-        "tackling":            ["tackling", "Tackling", "tacklingStyle", "tacklingId"],
-        "pressure":            ["pressure", "Pressure", "pressingRate", "pressPressure"],
-        "mentality":           ["mentality", "Mentality", "teamMentality"],
-        "tempo":               ["tempo", "Tempo", "playingTempo"],
-        "forwards_tactic":     ["forwardsTactic", "forwardTactic", "attackingTactic",
-                                 "forwardPlay", "forwardsPlay", "forwardsTacticId"],
-        "midfielders_tactic":  ["midfieldersTactic", "midfielderTactic", "midfieldPlay",
-                                 "midfielderPlay", "midfieldersTacticId"],
-        "defenders_tactic":    ["defendersTactic", "defenderTactic", "defensivePlay",
-                                 "defenderPlay", "defendersTacticId"],
-        "offside_trap":        ["offsideTrap", "offside", "offsideEnabled",
-                                 "offsideTrapEnabled", "isOffsideTrap"],
-        "marking":             ["marking", "Marking", "markingStyle", "markingId"],
-    }
-
     applied = []
     failed  = []
 
     for key, value in kwargs.items():
         if value is None:
             continue
-        ko_names = KO_MAP.get(key, [])
-        if not ko_names:
+
+        ko_prop    = _KO_TACTIC_PROP.get(key)
+        legacy_key = _KO_FIELD_MAP.get(key, key)
+        osm_val, _ = _to_osm(key, value)
+
+        if ko_prop is None:
             failed.append(key)
             continue
 
-        js_names = json.dumps(ko_names)
-        js_value = json.dumps(value)
+        js_prop    = json.dumps(ko_prop)
+        js_legacy  = json.dumps(legacy_key)
+        js_val     = json.dumps(osm_val)
+
         ok = page.evaluate(f"""
             (function() {{
-                const names   = {js_names};
-                const val     = {js_value};
-                // Todos los elementos con data-bind conocidos + fallbacks genéricos
-                const candidates = [
-                    document.querySelector('[data-bind*="offside"]'),
-                    document.querySelector('[data-bind*="gamePlan"]'),
-                    document.querySelector('[data-bind*="gameplan"]'),
-                    document.querySelector('[data-bind*="tackling"]'),
-                    document.querySelector('[data-bind*="pressure"]'),
-                    document.querySelector('[data-bind*="tempo"]'),
-                    document.querySelector('[data-bind*="mentality"]'),
-                    document.querySelector('[data-bind*="marking"]'),
-                    document.querySelector('[data-bind*="forwardsTactic"]'),
-                    document.querySelector('[data-bind*="defendersTactic"]'),
-                    document.querySelector('[data-bind*="midfieldersTactic"]'),
-                    document.querySelector('.tactics-container'),
-                    document.querySelector('[class*="tactic"]'),
-                    document.querySelector('#tactics'),
+                const prop    = {js_prop};
+                const legacy  = {js_legacy};
+                const val     = {js_val};
+
+                // Fuentes del viewmodel — carousel wrappers son el mejor punto de entrada
+                // para el viewmodel del editor de tácticas (no el de la preview del partido)
+                const sourceEls = [
+                    document.getElementById('carousel-tacticoverall'),
+                    document.getElementById('carousel-tacticstyleofplay'),
+                    document.getElementById('carousel-tacticlineatt'),
+                    document.querySelector('.tactic-slider-input'),
+                    document.querySelector('[data-bind*="tacticOverall"]'),
+                    document.querySelector('[data-bind*="tacticStyleOfPlay"]'),
+                    document.querySelector('[data-bind*="tacticPressure"]'),
+                    document.querySelector('[data-bind*="tacticOffsideTrap"]'),
                     document.body,
                 ].filter(Boolean);
 
-                // Extrae el viewmodel KO de un elemento
-                function getVm(el) {{
+                function getRoots(el) {{
                     try {{
                         const ctx = ko.contextFor(el);
-                        if (!ctx) return null;
-                        return ctx.$root || ctx.$data || null;
-                    }} catch(e) {{ return null; }}
+                        if (!ctx) return [];
+                        return [ctx.$root, ctx.$data, ctx.$parent].filter(
+                            v => v && typeof v === 'object'
+                        );
+                    }} catch(e) {{ return []; }}
                 }}
 
-                // Intenta setear el valor en un viewmodel dado
-                function trySet(vm) {{
-                    if (!vm) return false;
-                    // 1. Coincidencia exacta
-                    for (const name of names) {{
-                        if (typeof vm[name] === 'function') {{
-                            vm[name](val);
-                            return true;
+                const seen = new WeakSet();
+
+                for (const el of sourceEls) {{
+                    for (const vm of getRoots(el)) {{
+                        if (seen.has(vm)) continue;
+                        seen.add(vm);
+
+                        // ── Capa 1: vm[tacticProp].sliderValue(val) ─────────
+                        const tacticObj = vm[prop];
+                        if (tacticObj && typeof tacticObj.sliderValue === 'function') {{
+                            tacticObj.sliderValue(val);
+                            return {{ layer: 1, prop }};
                         }}
-                    }}
-                    // 2. Coincidencia case-insensitive
-                    const lower = names.map(n => n.toLowerCase());
-                    for (const prop of Object.keys(vm)) {{
-                        if (lower.includes(prop.toLowerCase()) && typeof vm[prop] === 'function') {{
-                            vm[prop](val);
-                            return true;
+
+                        // ── Capa 2: vm[legacyField](val) — campo plano ────────
+                        if (typeof vm[legacy] === 'function') {{
+                            vm[legacy](val);
+                            return {{ layer: 2, prop: legacy }};
                         }}
-                    }}
-                    // 3. Un nivel de profundidad (sub-objetos)
-                    for (const prop of Object.keys(vm)) {{
-                        const sub = vm[prop];
-                        if (!sub || typeof sub !== 'object' || Array.isArray(sub)) continue;
-                        for (const name of names) {{
-                            if (typeof sub[name] === 'function') {{
-                                sub[name](val);
-                                return true;
+
+                        // ── Capa 3: nextRoundPartial().match.*.tactic ─────────
+                        try {{
+                            const nrp = vm.nextRoundPartial;
+                            if (typeof nrp === 'function') {{
+                                const match = nrp()?.match;
+                                for (const team of [match?.homeTeam, match?.awayTeam].filter(Boolean)) {{
+                                    const t = team.tactic;
+                                    if (t && typeof t[legacy] === 'function') {{
+                                        t[legacy](val);
+                                        return {{ layer: 3, prop: legacy }};
+                                    }}
+                                }}
                             }}
-                        }}
+                        }} catch(e) {{}}
                     }}
-                    return false;
                 }}
-
-                const seen = new Set();
-                for (const el of candidates) {{
-                    const vm = getVm(el);
-                    if (!vm || seen.has(vm)) continue;
-                    seen.add(vm);
-                    if (trySet(vm)) return true;
-                    // Intentar también con $parent y $parents
-                    try {{
-                        const ctx = ko.contextFor(el);
-                        if (ctx.$parent && !seen.has(ctx.$parent)) {{
-                            seen.add(ctx.$parent);
-                            if (trySet(ctx.$parent)) return true;
-                        }}
-                    }} catch(e) {{}}
-                }}
-                return false;
+                return null;
             }})()
         """)
 
         if ok:
             applied.append(key)
-            print(f"  ✓ KO: {key} = {value!r}")
+            print(f"  ✓ KO L{ok.get('layer','?')}: {key} = {osm_val!r}  ({ok.get('prop')})")
         else:
             failed.append(key)
-            print(f"  ⚠️ KO falló: {key}")
+            print(f"  ⚠️ KO falló: {key} ({ko_prop})")
 
     return {"applied": applied, "failed": failed}
 
 
 def _set_via_ui(page: Page, **kwargs) -> tuple[list, list]:
     """
-    Configura tácticas navegando los carousels y sliders de la UI.
-    Necesita conocer los selectores reales de la página.
+    Fallback UI: navega los carousels con prev/next (IDs exactos conocidos)
+    y rellena los inputs numéricos de slider.
+    Solo se ejecuta si _try_set_via_ko falla en algún campo.
     """
     changed = []
     errors  = []
 
-    # Intentar detectar la estructura de la página automáticamente
-    structure = _detect_tactics_structure(page)
+    # Campos que usan carousel caroufredsel con IDs fijos
+    CAROUSEL_FIELDS = {k for k in _CAROUSEL_ID}
 
-    CAROUSEL_FIELDS = {
-        "game_plan":          structure.get("game_plan_sel"),
-        "formation":          structure.get("formation_sel"),
-        "tackling":           structure.get("tackling_sel"),
-        "forwards_tactic":    structure.get("fwd_tactic_sel"),
-        "midfielders_tactic": structure.get("mid_tactic_sel"),
-        "defenders_tactic":   structure.get("def_tactic_sel"),
-        "marking":            structure.get("marking_sel"),
-    }
-    SLIDER_FIELDS = {
-        "pressure":  structure.get("pressure_slider"),
-        "mentality": structure.get("mentality_slider"),
-        "tempo":     structure.get("tempo_slider"),
+    # Selectores para los inputs numéricos visibles de cada slider
+    SLIDER_INPUTS = {
+        "pressure":  "input.tactic-slider-input[data-bind*='tacticPressure']",
+        "mentality": "input.tactic-slider-input[data-bind*='tacticMentality']",
+        "tempo":     "input.tactic-slider-input[data-bind*='tacticTempo']",
     }
 
     for field, value in kwargs.items():
         if value is None:
             continue
 
-        if field in CAROUSEL_FIELDS and CAROUSEL_FIELDS[field]:
-            if _set_carousel(page, CAROUSEL_FIELDS[field], str(value)):
+        if field in CAROUSEL_FIELDS:
+            osm_idx, str_val = _to_osm(field, value)
+            # Para offside_trap y marking el "texto" de referencia viene del dict
+            # Usar el carousel ID exacto + leer índice actual via KO + navegar
+            carousel_id = _CAROUSEL_ID[field]
+            ko_prop     = _KO_TACTIC_PROP.get(field)
+            if _navigate_carousel(page, carousel_id, ko_prop, osm_idx, str(str_val)):
                 changed.append(field)
             else:
                 errors.append(f"carousel:{field}")
 
-        elif field in SLIDER_FIELDS and SLIDER_FIELDS[field]:
-            if _set_slider(page, SLIDER_FIELDS[field], int(value)):
+        elif field in SLIDER_INPUTS:
+            sel = SLIDER_INPUTS[field]
+            # Intentar rellenar el input numérico visible
+            try:
+                loc = page.locator(sel).first
+                if loc.count() == 0:
+                    # Fallback posicional
+                    idx = list(SLIDER_INPUTS.keys()).index(field)
+                    loc = page.locator("input.tactic-slider-input").nth(idx)
+                loc.fill(str(int(value)))
+                loc.dispatch_event("change")
+                time.sleep(0.3)
                 changed.append(field)
-            else:
+                print(f"  ✓ input: {field} = {value}")
+            except Exception as e:
+                print(f"  ⚠️ input slider {field}: {e}")
                 errors.append(f"slider:{field}")
 
         elif field == "offside_trap":
@@ -527,6 +674,113 @@ def _set_via_ui(page: Page, **kwargs) -> tuple[list, list]:
     return changed, errors
 
 
+def _navigate_carousel(page: Page, carousel_id: str, ko_prop: str | None,
+                        target_idx: int, target_text: str) -> bool:
+    """
+    Navega el carousel con id=carousel_id hasta el índice target_idx.
+    Lee el índice actual via KO si es posible; si no, lee el texto visible.
+    """
+    # Leer índice actual via KO
+    current_idx = None
+    if ko_prop:
+        try:
+            current_idx = page.evaluate(f"""
+                () => {{
+                    const el  = document.getElementById({json.dumps(carousel_id)});
+                    if (!el) return null;
+                    const ctx = ko.contextFor(el);
+                    if (!ctx) return null;
+                    for (const vm of [ctx.$root, ctx.$data, ctx.$parent].filter(Boolean)) {{
+                        const obj = vm[{json.dumps(ko_prop)}];
+                        if (obj && typeof obj.sliderValue === 'function')
+                            return obj.sliderValue();
+                    }}
+                    return null;
+                }}
+            """)
+        except Exception:
+            pass
+
+    # Si no pudimos leer el índice, intentar leer el texto visible para comparar
+    if current_idx is None:
+        current_text = _read_carousel(page, f"#{carousel_id}")
+        if current_text.lower() == target_text.lower():
+            return True   # ya está en el valor correcto
+
+    if current_idx == target_idx:
+        return True       # ya está en el valor correcto
+
+    # Selectors de flechas dentro del carousel
+    prev_sel = f"#{carousel_id} .carousel-prev"
+    next_sel = f"#{carousel_id} .carousel-next"
+
+    try:
+        prev_loc = page.locator(prev_sel).first
+        next_loc = page.locator(next_sel).first
+        if not next_loc.is_visible(timeout=1000):
+            print(f"  ⚠️ carousel arrows no visibles: #{carousel_id}")
+            return False
+    except Exception as e:
+        print(f"  ⚠️ carousel #{carousel_id}: {e}")
+        return False
+
+    # Navegar haciendo clic
+    max_steps = 10
+    for _ in range(max_steps):
+        # Releer índice actual
+        cur = None
+        if ko_prop:
+            try:
+                cur = page.evaluate(f"""
+                    () => {{
+                        const el = document.getElementById({json.dumps(carousel_id)});
+                        const ctx = el && ko.contextFor(el);
+                        if (!ctx) return null;
+                        for (const vm of [ctx.$root, ctx.$data].filter(Boolean)) {{
+                            const obj = vm[{json.dumps(ko_prop)}];
+                            if (obj && typeof obj.sliderValue === 'function') return obj.sliderValue();
+                        }}
+                        return null;
+                    }}
+                """)
+            except Exception:
+                pass
+
+        if cur == target_idx:
+            print(f"  ✓ carousel: {carousel_id} → idx {target_idx} ({target_text!r})")
+            return True
+
+        # Decidir dirección
+        if cur is not None:
+            click_next = (target_idx > cur)
+        else:
+            # Sin índice, intentar leer texto
+            cur_text = _read_carousel(page, f"#{carousel_id}")
+            if cur_text.lower() == target_text.lower():
+                print(f"  ✓ carousel: {carousel_id} → {target_text!r}")
+                return True
+            click_next = True  # avanzar por defecto
+
+        try:
+            if click_next:
+                next_loc.click()
+            else:
+                prev_loc.click()
+            time.sleep(0.25)
+        except Exception as e:
+            print(f"  ⚠️ click carousel #{carousel_id}: {e}")
+            return False
+
+    # Verificar una última vez
+    cur_text = _read_carousel(page, f"#{carousel_id}")
+    if cur_text.lower() == target_text.lower():
+        print(f"  ✓ carousel: {carousel_id} → {target_text!r}")
+        return True
+
+    print(f"  ⚠️ carousel #{carousel_id}: no se llegó a {target_text!r} (actual: {cur_text!r})")
+    return False
+
+
 def _detect_tactics_structure(page: Page) -> dict:
     """
     Detecta los selectores reales de la página de tácticas inspeccionando el DOM.
@@ -534,44 +788,58 @@ def _detect_tactics_structure(page: Page) -> dict:
     """
     result = {}
 
-    # Estrategia: buscar elementos con data-bind que contengan las palabras clave
+    # Carousels: buscar por data-bind, usar selector de atributo (más fiable que id/class)
+    carousel_bind_map = {
+        "game_plan_sel":  ["style", "gameStyle", "gamePlan", "gameplan"],
+        "tackling_sel":   ["overallMatchTactics", "tackling"],
+        "fwd_tactic_sel": ["attack", "forwardsTactic", "forwardTactic"],
+        "mid_tactic_sel": ["midfield", "midfieldersTactic", "midfielderTactic"],
+        "def_tactic_sel": ["defense", "defendersTactic", "defenderTactic"],
+        "marking_sel":    ["marking"],
+    }
+    for key, words in carousel_bind_map.items():
+        for word in words:
+            sel = f"[data-bind*='{word}']"
+            try:
+                if page.locator(sel).count() > 0:
+                    result[key] = sel
+                    break
+            except Exception:
+                pass
+
+    # Sliders: buscar por data-bind o por label de texto
     binds = page.evaluate("""
         () => {
             const out = {};
             document.querySelectorAll('[data-bind]').forEach(el => {
                 const b = el.getAttribute('data-bind').toLowerCase();
-                const id = el.id || el.className.split(' ')[0] || el.tagName;
-                if (b.includes('gameplan') || b.includes('game_plan')) out.game_plan = '#' + (el.id || id);
-                if (b.includes('formation'))  out.formation  = '#' + (el.id || id);
-                if (b.includes('tackling'))   out.tackling   = '#' + (el.id || id);
-                if (b.includes('pressure') && b.includes('range')) out.pressure_slider = '#' + (el.id || id);
-                if (b.includes('mentality') && b.includes('range')) out.mentality_slider = '#' + (el.id || id);
-                if (b.includes('tempo') && b.includes('range')) out.tempo_slider = '#' + (el.id || id);
+                if (el.tagName === 'INPUT' && el.type === 'range') {
+                    if (b.includes('pressing') || b.includes('pressure')) out.pressure_slider = el.id ? '#'+el.id : null;
+                    if (b.includes('mentality')) out.mentality_slider = el.id ? '#'+el.id : null;
+                    if (b.includes('tempo'))     out.tempo_slider     = el.id ? '#'+el.id : null;
+                }
             });
-            // Sliders por tipo
+            // Sliders por label de texto
             document.querySelectorAll('input[type="range"]').forEach((el, i) => {
                 const label = el.closest('div, li, tr')?.querySelector('label, span, h4')?.innerText?.toLowerCase() || '';
-                const key = label.includes('pressure') ? 'pressure_slider'
-                          : label.includes('mental')   ? 'mentality_slider'
-                          : label.includes('tempo')    ? 'tempo_slider'
+                const key = label.includes('press') ? 'pressure_slider'
+                          : label.includes('mental') ? 'mentality_slider'
+                          : label.includes('tempo')  ? 'tempo_slider'
                           : null;
-                if (key && el.id) out[key] = '#' + el.id;
-                else if (key)     out[key] = `input[type="range"]:nth-of-type(${i+1})`;
+                if (key && !out[key]) out[key] = el.id ? '#'+el.id : `input[type="range"]:nth-of-type(${i+1})`;
             });
             return out;
         }
     """)
-    result.update(binds or {})
+    result.update({k: v for k, v in (binds or {}).items() if v})
 
-    # Si no encontramos sliders por data-bind, intentar por posición
+    # Fallback posicional para sliders si no se detectaron por data-bind/label
     if not result.get("pressure_slider"):
         sliders = page.locator('input[type="range"]')
-        if sliders.count() >= 1:
-            result["pressure_slider"]  = 'input[type="range"]:nth-of-type(1)'
-        if sliders.count() >= 2:
-            result["mentality_slider"] = 'input[type="range"]:nth-of-type(2)'
-        if sliders.count() >= 3:
-            result["tempo_slider"]     = 'input[type="range"]:nth-of-type(3)'
+        n = sliders.count()
+        if n >= 1: result["pressure_slider"]  = 'input[type="range"]:nth-of-type(1)'
+        if n >= 2: result["mentality_slider"] = 'input[type="range"]:nth-of-type(2)'
+        if n >= 3: result["tempo_slider"]     = 'input[type="range"]:nth-of-type(3)'
 
     return result
 
@@ -676,8 +944,172 @@ def _toggle_offside_direct(page: Page, enable: bool) -> bool:
     return False
 
 
-def _click_save(page: Page) -> bool:
-    """Hace click en el botón de guardar tácticas."""
+def _verify_ko_state(page: Page, kwargs: dict) -> dict:
+    """
+    Lee los valores actuales de los observables KO del editor de tácticas y los imprime.
+    Devuelve un dict field->current_value para comparar con lo solicitado.
+    """
+    prop_names = list(_KO_TACTIC_PROP.values())
+    try:
+        result = page.evaluate(f"""
+            () => {{
+                const propNames = {json.dumps(prop_names)};
+                const sourceEls = [
+                    document.getElementById('carousel-tacticoverall'),
+                    document.getElementById('carousel-tacticstyleofplay'),
+                    document.querySelector('[data-bind*="tacticOverall"]'),
+                    document.body,
+                ].filter(Boolean);
+
+                function getVm(el) {{
+                    try {{
+                        const ctx = ko.contextFor(el);
+                        if (!ctx) return null;
+                        for (const vm of [ctx.$root, ctx.$data, ctx.$parent].filter(Boolean)) {{
+                            if (vm && vm.tacticOverall && typeof vm.tacticOverall.sliderValue === 'function')
+                                return vm;
+                        }}
+                    }} catch(e) {{}}
+                    return null;
+                }}
+
+                let vm = null;
+                for (const el of sourceEls) {{
+                    vm = getVm(el);
+                    if (vm) break;
+                }}
+                if (!vm) return {{ error: 'no_vm' }};
+
+                const values = {{}};
+                for (const p of propNames) {{
+                    const obj = vm[p];
+                    if (obj && typeof obj.sliderValue === 'function')
+                        values[p] = obj.sliderValue();
+                    else if (typeof obj === 'function')
+                        try {{ values[p] = obj(); }} catch(e) {{ values[p] = null; }}
+                    else
+                        values[p] = obj;
+                }}
+
+                // Buscar métodos de save / isChanged en el VM
+                const saveMethods = [];
+                const changedFlags = {{}};
+                for (const k of Object.keys(vm)) {{
+                    const kl = k.toLowerCase();
+                    if (kl.includes('save') || kl.includes('update') || kl.includes('confirm'))
+                        saveMethods.push(k);
+                }}
+                // isChanged de cada propiedad tactic
+                for (const p of propNames) {{
+                    const obj = vm[p];
+                    if (obj && typeof obj.isChanged === 'function')
+                        try {{ changedFlags[p] = obj.isChanged(); }} catch(e) {{}}
+                }}
+                return {{ values, saveMethods, changedFlags }};
+            }}
+        """)
+    except Exception as e:
+        print(f"  [verify] error leyendo KO: {e}")
+        return {}
+
+    if result.get("error"):
+        print(f"  [verify] no se encontró viewmodel KO ({result['error']})")
+        return {}
+
+    # Mapear prop→field para comparación
+    prop_to_field = {v: k for k, v in _KO_TACTIC_PROP.items()}
+    values = result.get("values", {})
+    changed_flags = result.get("changedFlags", {})
+    save_methods = result.get("saveMethods", [])
+
+    print("  [verify] Estado KO actual del editor de tácticas:")
+    field_values = {}
+    for prop, current in values.items():
+        field = prop_to_field.get(prop, prop)
+        requested = kwargs.get(field)
+        expected_osm, _ = _to_osm(field, requested) if requested is not None else (None, None)
+        match_mark = "✓" if (requested is None or current == expected_osm) else "✗"
+        changed_str = f" isChanged={changed_flags.get(prop)}" if prop in changed_flags else ""
+        if requested is not None:
+            print(f"    {match_mark} {field}: actual={current!r}  esperado={expected_osm!r}{changed_str}")
+        field_values[field] = current
+
+    if save_methods:
+        print(f"  [verify] Métodos save encontrados en VM: {save_methods}")
+
+    return {"field_values": field_values, "save_methods": save_methods, "raw_values": values}
+
+
+def _force_save(page: Page, vm_save_methods: list | None = None) -> bool:
+    """
+    Intenta persistir los cambios de tácticas en OSM.
+    Estrategia 1: llamar métodos save/update en el viewmodel KO.
+    Estrategia 2: simular un clic de carousel (next + prev) en cualquier carousel
+                  para forzar que isChanged() se active y el auto-save dispare.
+    Estrategia 3: buscar y clicar botón Save visible.
+    """
+    # ── Estrategia 1: llamar método de save en el VM ──────────────────────────
+    if vm_save_methods:
+        try:
+            saved = page.evaluate(f"""
+                () => {{
+                    const methods = {json.dumps(vm_save_methods)};
+                    const sourceEls = [
+                        document.getElementById('carousel-tacticoverall'),
+                        document.body,
+                    ].filter(Boolean);
+                    function getVm(el) {{
+                        try {{
+                            const ctx = ko.contextFor(el);
+                            if (!ctx) return null;
+                            for (const vm of [ctx.$root, ctx.$data].filter(Boolean))
+                                if (vm && vm.tacticOverall && typeof vm.tacticOverall.sliderValue === 'function')
+                                    return vm;
+                        }} catch(e) {{}}
+                        return null;
+                    }}
+                    let vm = null;
+                    for (const el of sourceEls) {{ vm = getVm(el); if (vm) break; }}
+                    if (!vm) return null;
+                    for (const m of methods) {{
+                        if (typeof vm[m] === 'function') {{
+                            try {{ vm[m](); return m; }} catch(e) {{}}
+                        }}
+                    }}
+                    return null;
+                }}
+            """)
+            if saved:
+                print(f"  ✓ Save vía VM.{saved}()")
+                time.sleep(1.5)
+                return True
+        except Exception as e:
+            print(f"  ⚠️ VM save error: {e}")
+
+    # ── Estrategia 2: nudge de carousel para activar isChanged() ─────────────
+    # Hace clic en "next" y luego en "prev" para que OSM detecte interacción
+    # sin cambiar el valor real; esto dispara el debounced auto-save de OSM.
+    nudge_carousel_ids = [
+        "carousel-tacticoverall",
+        "carousel-tacticstyleofplay",
+        "carousel-tacticlineatt",
+    ]
+    for cid in nudge_carousel_ids:
+        try:
+            next_loc = page.locator(f"#{cid} .carousel-next").first
+            prev_loc = page.locator(f"#{cid} .carousel-prev").first
+            if next_loc.is_visible(timeout=800) and prev_loc.is_visible(timeout=500):
+                next_loc.click()
+                time.sleep(0.3)
+                prev_loc.click()
+                time.sleep(0.3)
+                print(f"  ✓ Nudge carousel #{cid} para activar isChanged()")
+                time.sleep(2)
+                return True
+        except Exception:
+            pass
+
+    # ── Estrategia 3: botón Save visible ─────────────────────────────────────
     save_sels = [
         "button:has-text('Save')",
         "button:has-text('Guardar')",
@@ -690,39 +1122,58 @@ def _click_save(page: Page) -> bool:
     for sel in save_sels:
         try:
             loc = page.locator(sel).first
-            if loc.is_visible(timeout=1000):
+            if loc.is_visible(timeout=500):
                 loc.click()
                 time.sleep(1)
                 handle_popups(page)
-                print("  ✓ Tácticas guardadas.")
+                print(f"  ✓ Save vía botón ({sel})")
                 return True
         except Exception:
             pass
-    print("  ✓ Tácticas guardadas automáticamente (OSM no requiere botón de guardar).")
-    return True
+
+    print("  ⚠️ No se pudo confirmar save (auto-save puede haber disparado igual)")
+    return False
+
+
+def _click_save(page: Page) -> bool:
+    """Hace click en el botón de guardar tácticas (legacy, usa _force_save internamente)."""
+    return _force_save(page)
 
 
 # ── WRAPPER PARA SER LLAMADO DESDE EL BOT ─────────────────────────────────────
 
 def set_tactics_for_slot(
     page: Page,
-    slot_index: int,
+    league_name: str,
     career_url: str = "https://en.onlinesoccermanager.com/Career",
     **kwargs,
 ) -> dict:
     """
-    Activa el slot indicado, navega a /Tactics y aplica los cambios.
-    Llama a click_slot_and_wait_for_dashboard antes de set_tactics.
+    Encuentra el slot de Career que corresponde a league_name y aplica los cambios.
+    Usa get_slot_info para identificar el slot por nombre — nunca por índice DOM.
     """
-    from utils import click_slot_and_wait_for_dashboard, wait_for_visible_slots
+    from utils import click_slot_and_wait_for_dashboard, wait_for_visible_slots, get_slot_info
 
-    # Navegar a Career y activar el slot
     page.goto(career_url, wait_until="domcontentloaded", timeout=30000)
     wait_for_visible_slots(page, timeout=20000)
     time.sleep(1)
     handle_popups(page)
 
-    if not click_slot_and_wait_for_dashboard(page, slot_index):
+    slots = page.locator(".career-teamslot")
+    count = slots.count()
+    target_idx = None
+    for i in range(count):
+        _, slot_league = get_slot_info(slots.nth(i))
+        if slot_league and league_name.lower() in slot_league.lower():
+            target_idx = i
+            print(f"  ✓ Slot encontrado: índice DOM {i} → '{slot_league}'")
+            break
+
+    if target_idx is None:
+        print(f"  ❌ No se encontró slot para liga '{league_name}' (slots={count})")
+        return {"success": False, "changed": [], "errors": [f"slot_not_found:{league_name}"]}
+
+    if not click_slot_and_wait_for_dashboard(page, target_idx):
         return {"success": False, "changed": [], "errors": ["slot_activation_failed"]}
 
     return set_tactics(page, **kwargs)
