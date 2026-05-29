@@ -195,42 +195,111 @@ def _set_formation_via_modal(page: Page, formation: str) -> bool:
         return False
 
 
+def _click_improve_lineup(page: Page) -> bool:
+    """
+    Hace clic en el botón 'Mejorar' (.lineup-view-switch-improve) que coloca
+    los mejores jugadores disponibles en la alineación.
+    El botón llama a $root.improveLineup() vía KO y recarga la página.
+    """
+    # Estrategia 1: KO directo
+    try:
+        ok = page.evaluate("""
+            (function() {
+                const el = document.querySelector('.lineup-view-switch-improve') ||
+                           document.querySelector('[data-bind*="improveLineup"]');
+                if (!el) return false;
+                try {
+                    const ctx = ko.contextFor(el);
+                    const vm = ctx && (ctx.$root || ctx.$data);
+                    if (vm && typeof vm.improveLineup === 'function') {
+                        vm.improveLineup();
+                        return true;
+                    }
+                } catch(e) {}
+                return false;
+            })()
+        """)
+        if ok:
+            print("  ✓ KO: improveLineup() llamado")
+            page.wait_for_load_state("domcontentloaded", timeout=15000)
+            time.sleep(2)
+            handle_popups(page)
+            return True
+    except Exception as e:
+        print(f"  ⚠️ KO improveLineup error: {e}")
+
+    # Estrategia 2: clic directo en el elemento
+    for sel in [
+        ".lineup-view-switch-improve",
+        "[data-bind*='improveLineup']",
+        ".lineup-view-switch-container:has-text('Mejorar')",
+        "div:has-text('Mejorar')",
+    ]:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=1500):
+                loc.click()
+                print(f"  ✓ Clic en Mejorar ({sel})")
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+                time.sleep(2)
+                handle_popups(page)
+                return True
+        except Exception:
+            pass
+
+    print("  ⚠️ No se encontró el botón 'Mejorar'")
+    return False
+
+
 def set_lineup(page: Page, formation: str) -> dict:
     """
-    Cambia la formación del equipo activo.
-    Returns dict: { "success": bool, "formation": str, "errors": list[str] }
+    Cambia la formación del equipo activo y aplica los mejores jugadores disponibles.
+    Returns dict: { "success": bool, "formation": str, "improved": bool, "errors": list[str] }
     """
     if formation not in VALID_FORMATIONS:
-        return {"success": False, "formation": formation, "errors": [f"invalid_formation:{formation}"]}
+        return {"success": False, "formation": formation, "improved": False,
+                "errors": [f"invalid_formation:{formation}"]}
 
     errors = []
     try:
         handle_popups(page)
 
         if not _navigate_to_lineup(page):
-            return {"success": False, "formation": formation, "errors": ["page_not_loaded"]}
+            return {"success": False, "formation": formation, "improved": False,
+                    "errors": ["page_not_loaded"]}
 
         time.sleep(1)
         handle_popups(page)
 
+        formation_set = False
+
         # Estrategia 1: KO directo (no abre modal)
         if _set_formation_via_ko(page, formation):
-            time.sleep(1.5)
-            return {"success": True, "formation": formation, "errors": []}
+            time.sleep(1)
+            formation_set = True
 
         # Estrategia 2: interacción con el modal
-        if _set_formation_via_modal(page, formation):
-            time.sleep(1.5)
-            return {"success": True, "formation": formation, "errors": []}
+        elif _set_formation_via_modal(page, formation):
+            time.sleep(1)
+            formation_set = True
 
-        errors.append("formation_not_set")
-        print(f"  ❌ No se pudo establecer la formación '{formation}'")
+        if not formation_set:
+            errors.append("formation_not_set")
+            print(f"  ❌ No se pudo establecer la formación '{formation}'")
+            return {"success": False, "formation": formation, "improved": False, "errors": errors}
+
+        # Después de la formación, aplicar los mejores jugadores
+        improved = _click_improve_lineup(page)
+        if not improved:
+            errors.append("improve_failed")
+
+        return {"success": True, "formation": formation, "improved": improved, "errors": errors}
 
     except Exception as e:
         print(f"  ❌ Error en set_lineup: {e}")
         errors.append(str(e))
 
-    return {"success": False, "formation": formation, "errors": errors}
+    return {"success": False, "formation": formation, "improved": False, "errors": errors}
 
 
 def set_lineup_for_slot(
@@ -245,6 +314,7 @@ def set_lineup_for_slot(
     from utils import click_slot_and_wait_for_dashboard, wait_for_visible_slots, get_slot_info
 
     page.goto(career_url, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(2)  # dar tiempo a que el SPA inicie antes de buscar slots
     wait_for_visible_slots(page, timeout=20000)
     time.sleep(1)
     handle_popups(page)
@@ -253,7 +323,7 @@ def set_lineup_for_slot(
     count = slots.count()
     target_idx = None
     for i in range(count):
-        _, slot_league = get_slot_info(slots.nth(i))
+        _, slot_league, _ = get_slot_info(slots.nth(i))
         if slot_league and league_name.lower() in slot_league.lower():
             target_idx = i
             print(f"  ✓ Slot encontrado: índice DOM {i} → '{slot_league}'")

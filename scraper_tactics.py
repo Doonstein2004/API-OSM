@@ -63,7 +63,7 @@ def get_tactics_data(page: Page):
                 slot = slots.nth(i)
                 
                 from utils import get_slot_info
-                team_name, league_name = get_slot_info(slot)
+                team_name, league_name, _ = get_slot_info(slot)
                 
                 if not team_name:
                     print(f"Slot #{i + 1} no es procesable (Searching/Unavailable/Empty). Saltando.")

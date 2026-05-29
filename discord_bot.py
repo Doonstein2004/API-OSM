@@ -39,6 +39,9 @@ DB_CONFIG = {
 DISCORD_ALERT_CHANNEL_ID = int(os.getenv("DISCORD_ALERT_CHANNEL_ID", "0"))
 TIMER_WARNING_MINUTES    = int(os.getenv("TIMER_WARNING_MINUTES", "30"))
 TIMER_CHECK_MINUTES      = int(os.getenv("TIMER_CHECK_MINUTES", "20"))
+# Si un evento de entrenamiento/estadio empieza en menos de este tiempo,
+# se espera antes de lanzar la automatización (para aprovechar los timers reducidos)
+EVENT_DELAY_HOURS        = int(os.getenv("EVENT_DELAY_HOURS", "2"))
 
 OSM_COLOR   = 0x22D3EE   # Cyan del tema OSM
 ERROR_COLOR = 0xFF6B6B
@@ -252,6 +255,141 @@ def _scrape_setlineup_sync(user_id: str, league_name: str, formation: str) -> di
         conn.close()
 
 
+def _scrape_renewtraining_sync(user_id: str, league_name: str) -> dict:
+    """Renueva entrenamiento para un solo slot (usado por /renewtraining manual)."""
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_training import renew_training_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"claimed": [], "started": [], "errors": ["no_credentials"]}
+
+    conn = _db()
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            result = renew_training_for_slot(page, league_name)
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        print(f"❌ Error en scrape de training: {e}")
+        return {"claimed": [], "started": [], "errors": [str(e)]}
+    finally:
+        conn.close()
+
+
+def _scrape_renewtraining_batch_sync(user_id: str, renewals: list[tuple[str, str]]) -> dict[str, dict]:
+    """
+    Renueva entrenamientos para múltiples slots en UNA sola sesión de Playwright.
+    renewals: lista de (team_name, league_name)
+    Devuelve dict { team_name: result_dict }
+    """
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_training import renew_training_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {team: {"claimed": [], "started": [], "errors": ["no_credentials"]}
+                for team, _ in renewals}
+
+    conn = _db()
+    results = {}
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            for team, league_name in renewals:
+                print(f"  [batch training] Renovando: {team} ({league_name})")
+                try:
+                    results[team] = renew_training_for_slot(page, league_name)
+                except Exception as e:
+                    print(f"  ❌ Error renovando {team}: {e}")
+                    results[team] = {"claimed": [], "started": [], "errors": [str(e)]}
+            context.close()
+            browser.close()
+    except Exception as e:
+        print(f"❌ Error en batch training: {e}")
+        for team, _ in renewals:
+            if team not in results:
+                results[team] = {"claimed": [], "started": [], "errors": [str(e)]}
+    finally:
+        conn.close()
+    return results
+
+
+def _scrape_upgradestadium_sync(user_id: str, league_name: str,
+                                 preferred_parts: list[str] | None = None) -> dict:
+    """Upgrade de estadio para un slot (usado por /upgradestadium manual)."""
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_stadium import upgrade_stadium_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"claimed": [], "started": [], "skipped": [], "errors": ["no_credentials"],
+                "cf": 0.0, "savings": 0.0}
+    conn = _db()
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            result = upgrade_stadium_for_slot(page, league_name, preferred_parts)
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        print(f"❌ Error en upgrade estadio: {e}")
+        return {"claimed": [], "started": [], "skipped": [], "errors": [str(e)],
+                "cf": 0.0, "savings": 0.0}
+    finally:
+        conn.close()
+
+
+def _scrape_upgradestadium_batch_sync(user_id: str,
+                                       renewals: list[tuple[str, str, list | None]]) -> dict[str, dict]:
+    """
+    Upgrade de estadio para múltiples slots en UNA sola sesión.
+    renewals: lista de (team_name, league_name, preferred_parts_or_None)
+    """
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_stadium import upgrade_stadium_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {t: {"claimed": [], "started": [], "skipped": [], "errors": ["no_credentials"],
+                    "cf": 0.0, "savings": 0.0} for t, _, _ in renewals}
+    conn = _db()
+    results = {}
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            for team, league_name, preferred in renewals:
+                print(f"  [batch stadium] {team} ({league_name})")
+                try:
+                    results[team] = upgrade_stadium_for_slot(page, league_name, preferred)
+                except Exception as e:
+                    print(f"  ❌ Error stadium {team}: {e}")
+                    results[team] = {"claimed": [], "started": [], "skipped": [],
+                                     "errors": [str(e)], "cf": 0.0, "savings": 0.0}
+            context.close()
+            browser.close()
+    except Exception as e:
+        print(f"❌ Error en batch stadium: {e}")
+        for team, _, _ in renewals:
+            if team not in results:
+                results[team] = {"claimed": [], "started": [], "skipped": [],
+                                 "errors": [str(e)], "cf": 0.0, "savings": 0.0}
+    finally:
+        conn.close()
+    return results
+
+
 async def _get_timers_cached() -> list[dict]:
     """Devuelve los timers scrapeados, reutilizando resultado si tiene menos de TIMER_CHECK_MINUTES."""
     global _last_scrape_time, _last_scrape_result
@@ -278,6 +416,25 @@ def _fmt_seconds(seconds: int) -> str:
     if h: parts.append(f"{h}h")
     if m: parts.append(f"{m}m")
     return " ".join(parts) or "< 1m"
+
+
+def _has_upcoming_bonus_event(events: list[dict], event_type: str) -> tuple[bool, str]:
+    """
+    Devuelve (True, event_title) si hay un evento de tipo training/stadium que empieza
+    dentro de EVENT_DELAY_HOURS horas.
+    Palabras clave: en el título del evento (case-insensitive).
+    """
+    threshold = EVENT_DELAY_HOURS * 3600
+    kws_training = ["training", "entrenamiento", "coach", "progression", "skill", "atletismo"]
+    kws_stadium  = ["stadium", "estadio", "expansion", "build", "construction",
+                    "capacity", "pitch", "infraestructura"]
+    kws = kws_training if event_type == "training" else kws_stadium
+    for ev in events:
+        title = ev.get("title", "").lower()
+        secs  = ev.get("seconds", 0)
+        if any(k in title for k in kws) and 0 < secs <= threshold:
+            return True, ev.get("title", "")
+    return False, ""
 
 
 def _time_ago(dt: Optional[datetime]) -> str:
@@ -338,13 +495,19 @@ def embed_panel(leagues: list[dict], user_id: str) -> discord.Embed:
 
 
 def embed_timers(slot: dict) -> discord.Embed:
-    team   = slot.get("team_name", "Equipo")
-    league = slot.get("league_name", "")
-    timers = slot.get("timers", [])
+    team     = slot.get("team_name", "Equipo")
+    league   = slot.get("league_name", "")
+    timers   = slot.get("timers", [])
+    matchday = slot.get("matchday")
+
+    md_str = ""
+    if matchday:
+        cur, tot = matchday["current"], matchday["total"]
+        md_str = f"  ·  📅 Jornada **{cur}/{tot}**" + (" ✅" if matchday["finished"] else "")
 
     embed = discord.Embed(
         title=f"⏱  Timers — {team}",
-        description=f"Liga: **{league}**",
+        description=f"Liga: **{league}**{md_str}",
         color=OSM_COLOR,
         timestamp=_utcnow(),
     )
@@ -364,10 +527,13 @@ def embed_timers(slot: dict) -> discord.Embed:
             continue
 
         emoji = t.get("emoji", "⏱️")
-        # Para unknowns con countdown activo, etiquetar genéricamente
-        label = t.get("label_es") or t.get("label") or (
-            "Otros timers" if typ == "unknown" else "Timer"
-        )
+        # Para eventos: usar el título real en lugar de "Evento" genérico
+        if typ == "event" and t.get("event_title"):
+            label = t["event_title"]
+        else:
+            label = t.get("label_es") or t.get("label") or (
+                "Otros timers" if typ == "unknown" else "Timer"
+            )
 
         if is_ready or countdown.lower() in ("listo", "ready", ""):
             value = "✅ Listo"
@@ -511,9 +677,19 @@ async def _timer_alert_loop():
         print(f"  ⚠️ [notifs] Scrape fallido: {e}")
         return
 
+    # Acumular acciones — se procesan en una sola sesión de Playwright al final.
+    training_to_renew:  list[tuple[str, str]]            = []  # (team, league)
+    stadium_to_upgrade: list[tuple[str, str, list|None]] = []  # (team, league, preferred_parts)
+    # Rastrear qué slots tienen timer de estadio activo (no es necesario iniciar proactivamente)
+    slots_with_stadium_timer: set[int] = set()
+
     for slot in slots:
-        slot_idx = slot["slot_index"]
-        team     = slot["team_name"]
+        slot_idx    = slot["slot_index"]
+        team        = slot["team_name"]
+        league_name = slot.get("league_name", "")
+        matchday    = slot.get("matchday") or {}
+        slot_events = slot.get("events", [])
+
         for timer in slot["timers"]:
             typ      = timer["type"]
             seconds  = timer["seconds"]
@@ -523,11 +699,41 @@ async def _timer_alert_loop():
             key      = f"{slot_idx}_{typ}"
             prev     = _timer_state.get(key, seconds + 1)
 
-            # Timer expiró: estaba corriendo y ahora está listo
+            # Timer listo
             done_key = f"{key}_done"
-            if is_ready and prev > 60 and done_key not in _warned:
+            if is_ready and done_key not in _warned:
                 await channel.send(f"✅ **{emoji} {label}** listo en **{team}**!")
                 _warned.add(done_key)
+
+                if typ == "training" and league_name:
+                    if matchday.get("finished", False):
+                        md = matchday
+                        await channel.send(
+                            f"⏸ Temporada terminada (**{md['current']}/{md['total']}**) en **{team}** — entrenamiento omitido."
+                        )
+                    else:
+                        has_ev, ev_title = _has_upcoming_bonus_event(slot_events, "training")
+                        if has_ev:
+                            await channel.send(
+                                f"⏳ **{team}**: evento de entrenamiento próximo — **{ev_title}** "
+                                f"(en < {EVENT_DELAY_HOURS}h). Esperando para aprovechar timers reducidos."
+                            )
+                        else:
+                            training_to_renew.append((team, league_name))
+
+                elif typ == "stadium" and league_name:
+                    has_ev, ev_title = _has_upcoming_bonus_event(slot_events, "stadium")
+                    if has_ev:
+                        await channel.send(
+                            f"⏳ **{team}**: evento de estadio próximo — **{ev_title}** "
+                            f"(en < {EVENT_DELAY_HOURS}h). Esperando para aprovechar timers reducidos."
+                        )
+                    else:
+                        stadium_to_upgrade.append((team, league_name, None))
+
+            # Registrar que este slot tiene un timer de estadio (en curso o listo)
+            if typ == "stadium":
+                slots_with_stadium_timer.add(slot_idx)
 
             # Advertencia: timer bajo el umbral (solo una vez)
             warn_key = f"{key}_warn"
@@ -543,6 +749,66 @@ async def _timer_alert_loop():
                 _warned.discard(warn_key)
 
             _timer_state[key] = seconds
+
+    # ── Detección proactiva de estadio sin timer ─────────────────────────────
+    # Si un slot tiene temporada activa y NO tiene ningún timer de estadio
+    # (nada en construcción) → verificar si hay partes disponibles para ampliar.
+    for slot in slots:
+        slot_idx    = slot["slot_index"]
+        team        = slot["team_name"]
+        league_name = slot.get("league_name", "")
+        matchday    = slot.get("matchday") or {}
+        slot_events = slot.get("events", [])
+        if (slot_idx not in slots_with_stadium_timer
+                and league_name
+                and not matchday.get("finished", False)
+                and not any(lg == league_name for _, lg, _ in stadium_to_upgrade)):
+            has_ev, ev_title = _has_upcoming_bonus_event(slot_events, "stadium")
+            if has_ev:
+                # No añadir al batch — esperar el evento
+                pass
+            else:
+                stadium_to_upgrade.append((team, league_name, None))
+
+    # ── Renovar entrenamientos en una sola sesión de Playwright ──────────────
+    if training_to_renew:
+        teams_str = ", ".join(t for t, _ in training_to_renew)
+        await channel.send(f"🔄 Auto-renovando entrenamiento: **{teams_str}**...")
+        try:
+            batch_results = await asyncio.to_thread(
+                _scrape_renewtraining_batch_sync, OSM_USER_ID, training_to_renew
+            )
+            for team, result in batch_results.items():
+                claimed = result.get("claimed", [])
+                started = result.get("started", [])
+                errs    = result.get("errors", [])
+                if claimed or started:
+                    lines = [f"✅ **Entrenamiento renovado** en **{team}**"]
+                    for c in claimed:
+                        lines.append(f"  🏁 Terminó: **{c.get('player','?')}** ({c.get('title','?')})")
+                    for s in started:
+                        lines.append(f"  ▶️ Iniciado: **{s.get('player','?')}** ({s.get('title','?')})")
+                    await channel.send("\n".join(lines))
+                else:
+                    await channel.send(
+                        f"⚠️ No se renovó entrenamiento en **{team}**"
+                        + (f": `{', '.join(errs)}`" if errs else "")
+                    )
+        except Exception as e:
+            await channel.send(f"❌ Error en renovación de entrenamientos: {e}")
+
+    # ── Upgrade de estadios en una sola sesión de Playwright ─────────────────
+    if stadium_to_upgrade:
+        teams_str = ", ".join(t for t, _, _ in stadium_to_upgrade)
+        await channel.send(f"🏟️ Auto-actualizando estadio: **{teams_str}**...")
+        try:
+            batch_results = await asyncio.to_thread(
+                _scrape_upgradestadium_batch_sync, OSM_USER_ID, stadium_to_upgrade
+            )
+            for team, result in batch_results.items():
+                await channel.send(_fmt_stadium_result(result, team))
+        except Exception as e:
+            await channel.send(f"❌ Error en upgrade de estadios: {e}")
 
 
 # ── VIEWS (botones interactivos) ──────────────────────────────────────────────
@@ -588,7 +854,7 @@ class PanelView(discord.ui.View):
         )
 
     @discord.ui.button(label="⏱ Timers en Vivo", style=discord.ButtonStyle.primary, row=1)
-    async def btn_timers(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def btn_timers(self, interaction: discord.Interaction, _button: discord.ui.Button):
         if not _is_owner(interaction):
             await interaction.response.send_message("No autorizado.", ephemeral=True)
             return
@@ -665,6 +931,58 @@ class TacticsConfirmView(discord.ui.View):
         self.stop()
 
 
+class StadiumUpgradeView(discord.ui.View):
+    def __init__(self, league_name: str, slot_name: str, preferred_parts: list[str]):
+        super().__init__(timeout=60)
+        self.league_name    = league_name
+        self.slot_name      = slot_name
+        self.preferred_parts = preferred_parts
+
+    @discord.ui.button(label="✅ Confirmar", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if not _is_owner(interaction):
+            await interaction.response.send_message("No autorizado.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        result = await asyncio.to_thread(
+            _scrape_upgradestadium_sync, OSM_USER_ID, self.league_name, self.preferred_parts
+        )
+        self.stop()
+        await interaction.followup.send(
+            _fmt_stadium_result(result, self.slot_name), ephemeral=True
+        )
+
+    @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_message("Cancelado.", ephemeral=True)
+        self.stop()
+
+
+def _fmt_stadium_result(result: dict, team: str) -> str:
+    claimed  = result.get("claimed", [])
+    started  = result.get("started", [])
+    skipped  = result.get("skipped", [])
+    errors   = result.get("errors", [])
+    cf       = result.get("cf", 0)
+    savings  = result.get("savings", 0)
+
+    if not claimed and not started and not errors:
+        reasons = ", ".join(f"{t}({r})" for t, r in skipped) if skipped else "nada disponible"
+        return f"ℹ️ Sin cambios en estadio de **{team}**: {reasons}"
+
+    lines = [f"🏟️ **Estadio actualizado — {team}**"]
+    for c in claimed:
+        lines.append(f"  ✅ Completado: **{c}**")
+    for s in started:
+        lines.append(f"  🔨 Iniciado: **{s['type']}** ({s['name']}) — coste {s['cost']:,.0f}")
+    for t, r in skipped:
+        lines.append(f"  ⏭️ Saltado: {t} ({r})")
+    if errors:
+        lines.append(f"  ❌ Errores: `{', '.join(errors)}`")
+    lines.append(f"  💰 CF={cf:,.0f}  Savings={savings:,.0f}")
+    return "\n".join(lines)
+
+
 class LineupConfirmView(discord.ui.View):
     def __init__(self, league_name: str, formation: str):
         super().__init__(timeout=60)
@@ -682,8 +1000,9 @@ class LineupConfirmView(discord.ui.View):
         )
         self.stop()
         if result["success"]:
+            improved_str = "✅ Jugadores aplicados" if result.get("improved") else "⚠️ Jugadores no aplicados (revisa manualmente)"
             await interaction.followup.send(
-                f"✅ Formación aplicada: **{result['formation']}**", ephemeral=True
+                f"✅ Formación: **{result['formation']}**\n{improved_str}", ephemeral=True
             )
         else:
             errors = ", ".join(result["errors"])
@@ -707,7 +1026,7 @@ def _is_owner(interaction: discord.Interaction) -> bool:
 # ── AUTOCOMPLETE Y CHOICES ───────────────────────────────────────────────────
 
 async def _slot_autocomplete(
-    interaction: discord.Interaction, current: str
+    _interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
     """Devuelve los equipos activos como opciones para el parámetro slot."""
     try:
@@ -981,6 +1300,107 @@ async def cmd_settactics(
     await interaction.response.send_message(
         embed     = embed,
         view      = TacticsConfirmView(league_name=slot_name, kwargs=kwargs),
+        ephemeral = True,
+    )
+
+
+@tree.command(name="renewtraining", description="Renueva los entrenamientos terminados de un equipo (~30s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_renewtraining(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    try:
+        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx       = _slot_idx(slot, leagues)
+        slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
+    except Exception:
+        idx, slot_name = 0, "Equipo"
+
+    if idx is None:
+        await interaction.response.send_message("Equipo no encontrado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    result = await asyncio.to_thread(_scrape_renewtraining_sync, OSM_USER_ID, slot_name)
+
+    claimed = result.get("claimed", [])
+    started = result.get("started", [])
+    errors  = result.get("errors", [])
+
+    if claimed or started:
+        lines = [f"✅ **Entrenamientos renovados — {slot_name}**"]
+        for c in claimed:
+            p = c.get("player") or "?"
+            t = c.get("title") or f"slot {c.get('slot','?')}"
+            lines.append(f"  🏁 Terminó: **{p}** ({t})")
+        for s in started:
+            p = s.get("player") or "?"
+            t = s.get("title") or f"slot {s.get('slot','?')}"
+            lines.append(f"  ▶️ Iniciado: **{p}** ({t})")
+        if errors:
+            lines.append(f"  ⚠️ Errores: `{', '.join(errors)}`")
+        await interaction.followup.send("\n".join(lines), ephemeral=True)
+    else:
+        err_str = f": `{', '.join(errors)}`" if errors else " (no había entrenamientos listos o vacíos)"
+        await interaction.followup.send(
+            f"⚠️ No se renovaron entrenamientos en **{slot_name}**{err_str}",
+            ephemeral=True,
+        )
+
+
+_STADIUM_PART_CHOICES = [
+    app_commands.Choice(name="Entradas (Capacity)",           value="capacity"),
+    app_commands.Choice(name="Campo (Pitch)",                 value="pitch"),
+    app_commands.Choice(name="Entrenamiento (Training)",      value="training"),
+    app_commands.Choice(name="Auto (mejor disponible)",       value="auto"),
+]
+
+
+@tree.command(name="upgradestadium", description="Amplía el estadio de un equipo (~45s)")
+@app_commands.describe(
+    slot = "Selecciona tu equipo",
+    part = "Parte del estadio a ampliar",
+)
+@app_commands.autocomplete(slot=_slot_autocomplete)
+@app_commands.choices(part=_STADIUM_PART_CHOICES)
+async def cmd_upgradestadium(
+    interaction: discord.Interaction,
+    slot: str = "0",
+    part: str = "auto",
+):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    try:
+        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx       = _slot_idx(slot, leagues)
+        slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
+    except Exception:
+        idx, slot_name = 0, "Equipo"
+
+    if idx is None:
+        await interaction.response.send_message("Equipo no encontrado.", ephemeral=True)
+        return
+
+    preferred = None if part == "auto" else [part]
+    part_label = dict(capacity="Entradas", pitch="Campo", training="Entrenamiento").get(part, "Auto")
+
+    embed = discord.Embed(
+        title       = f"🏟️ Ampliar Estadio — {slot_name}",
+        description = f"¿Confirmas ampliar **{part_label}**?\n\n"
+                      "• Se verificará el saldo disponible\n"
+                      "• Si el dinero está en Savings se transferirá temporalmente\n"
+                      "• Al finalizar el saldo se devuelve a Savings",
+        color       = OSM_COLOR,
+    )
+    await interaction.response.send_message(
+        embed = embed,
+        view  = StadiumUpgradeView(league_name=slot_name, slot_name=slot_name,
+                                    preferred_parts=preferred),
         ephemeral = True,
     )
 

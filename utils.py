@@ -131,8 +131,17 @@ def wait_for_visible_slots(page: Page, timeout=40000):
                         break
                 
                 if visible_found:
-                    # Esperar un momento extra para que el contenido interno cargue
-                    page.wait_for_timeout(1000)
+                    # Esperar a que al menos un slot tenga datos de equipo cargados
+                    # (h2.clubslot-main-title solo aparece cuando KO.js pobló el slot)
+                    try:
+                        page.wait_for_selector(
+                            "h2.clubslot-main-title",
+                            timeout=8000,
+                            state="visible",
+                        )
+                    except Exception:
+                        # Si no aparece en 8s, continuar de todos modos
+                        page.wait_for_timeout(1000)
                     return True
         except:
             pass
@@ -160,7 +169,7 @@ def get_slot_info(slot_locator, max_retries=10):
             # Si el slot está explícitamente vacío, no perder tiempo reintentando
             if slot_locator.locator(".career-teamslot-empty-label").count() > 0:
                 print(f"    ℹ️ Slot sin utilizar detectado. Omitiendo.")
-                return None, None
+                return None, None, None
                 
             # Buscar títulos posibles
             titles = slot_locator.locator("h2.clubslot-main-title")
@@ -201,16 +210,34 @@ def get_slot_info(slot_locator, max_retries=10):
                 # Éxito: Tenemos nombre de equipo
                 league_loc = slot_locator.locator("h4.display-name")
                 league_name = league_loc.first.inner_text().strip() if league_loc.count() > 0 else "Unknown"
-                return team_name, league_name
-                
+
+                # Leer jornada actual / total desde .career-teamslot-matchday
+                matchday = None
+                try:
+                    md_loc = slot_locator.locator(".career-teamslot-matchday")
+                    if md_loc.count() > 0:
+                        spans = md_loc.first.locator("span")
+                        if spans.count() >= 3:
+                            current = int(spans.nth(0).inner_text().strip())
+                            total   = int(spans.nth(2).inner_text().strip())
+                            matchday = {
+                                "current":  current,
+                                "total":    total,
+                                "finished": current >= total,
+                            }
+                except Exception:
+                    pass
+
+                return team_name, league_name, matchday
+
             # Si llegamos aquí es porque está en un estado no deseado, esperamos y reintentamos
             time.sleep(2)
-            
+
         except Exception as e:
             print(f"    ⚠️ Error en get_slot_info (Intento {attempt+1}): {e}")
             time.sleep(1)
-            
-    return None, None
+
+    return None, None, None
 
     
 def safe_navigate(page: Page, url: str, verify_selector: str = None, max_retries=3):

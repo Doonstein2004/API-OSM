@@ -78,7 +78,7 @@ def get_match_results(page, scrape_future_fixtures=False):
             slot = page.locator(".career-teamslot").nth(i)
             
             from utils import get_slot_info
-            team_name, league_name = get_slot_info(slot)
+            team_name, league_name, _ = get_slot_info(slot)
             
             if not team_name:
                 print(f"Slot #{i + 1} no es procesable (Searching/Unavailable/Empty). Saltando.")

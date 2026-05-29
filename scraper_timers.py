@@ -121,7 +121,7 @@ def _extract_countdown(text: str) -> tuple[str, int]:
     return "", 0
 
 
-def _build_timer(raw_text: str, meta: str = "") -> dict:
+def _build_timer(raw_text: str, meta: str = "", event_title: str = "") -> dict:
     typ = _classify(raw_text, meta)
     countdown, seconds = _extract_countdown(raw_text)
 
@@ -136,7 +136,7 @@ def _build_timer(raw_text: str, meta: str = "") -> dict:
 
     is_ready = (seconds == 0 and countdown.lower() in ("listo", "ready", "disponible", ""))
 
-    return {
+    result = {
         "type":      typ,
         "label":     label,
         "label_es":  TIMER_LABEL_ES.get(typ, label or "Timer"),
@@ -145,6 +145,9 @@ def _build_timer(raw_text: str, meta: str = "") -> dict:
         "seconds":   seconds,
         "is_ready":  is_ready,
     }
+    if event_title:
+        result["event_title"] = event_title
+    return result
 
 
 def _deduplicate(timers: list[dict]) -> list[dict]:
@@ -236,12 +239,15 @@ def get_all_timers_for_slot(page: Page) -> list[dict]:
 
                 // 3. Timers de evento (p. ej. "World 2026 is coming")
                 menu.querySelectorAll('.event-timer').forEach(el => {
-                    const timerSpan = el.querySelector('.timer-time, span[data-bind*="secondsRemaining"]');
-                    const titleEl   = el.querySelector('.title, .bold');
+                    const timerSpan  = el.querySelector('.timer-time, span[data-bind*="secondsRemaining"]');
+                    const titleEl    = el.querySelector('span.title');
+                    const fallbackEl = el.querySelector('.bold');
+                    const eventTitle = (titleEl || fallbackEl)?.innerText?.trim() || '';
                     if (timerSpan && timerSpan.innerText.trim()) {
                         items.push({
-                            text: (titleEl ? titleEl.innerText.trim() + ' ' : '') + timerSpan.innerText.trim(),
-                            meta: 'event-timer'
+                            text:        eventTitle + ' ' + timerSpan.innerText.trim(),
+                            meta:        'event-timer',
+                            event_title: eventTitle,
                         });
                     }
                 });
@@ -287,7 +293,8 @@ def get_all_timers_for_slot(page: Page) -> list[dict]:
         """)
 
         for item in raw_items:
-            t = _build_timer(item.get("text", ""), item.get("meta", ""))
+            t = _build_timer(item.get("text", ""), item.get("meta", ""),
+                             event_title=item.get("event_title", ""))
             timers.append(t)
 
         if timers:
@@ -309,6 +316,37 @@ def get_all_timers_for_slot(page: Page) -> list[dict]:
         print(f"  ❌ Error en get_all_timers_for_slot: {e}")
 
     return timers
+
+
+def _get_events_ko(page: Page) -> list[dict]:
+    """
+    Lee los eventos activos del dashboard via KO (appViewModel.eventNotificationsPartial).
+    Devuelve lista de { title, explanation, seconds } con los eventos en curso.
+    """
+    try:
+        return page.evaluate("""
+            () => {
+                const vm = ko.contextFor(document.body)?.$root;
+                if (!vm || !vm.eventNotificationsPartial) return [];
+                const partial = typeof vm.eventNotificationsPartial === 'function'
+                    ? vm.eventNotificationsPartial() : vm.eventNotificationsPartial;
+                if (!partial || typeof partial.getItems !== 'function') return [];
+                return partial.getItems().map(ev => {
+                    const timer = typeof ev.countdownTimerPartial === 'function'
+                        ? ev.countdownTimerPartial() : null;
+                    const secs = timer && typeof timer.secondsRemaining === 'function'
+                        ? timer.secondsRemaining() : 0;
+                    return {
+                        title:       typeof ev.title === 'function'       ? ev.title()       : (ev.title || ''),
+                        explanation: typeof ev.explanation === 'function' ? ev.explanation() : (ev.explanation || ''),
+                        seconds:     secs || 0,
+                    };
+                }).filter(ev => ev.seconds > 0 || ev.title);
+            }
+        """) or []
+    except Exception as e:
+        print(f"  ⚠️ _get_events_ko: {e}")
+        return []
 
 
 def _fallback_next_match(page: Page) -> list[dict]:
@@ -371,7 +409,7 @@ def get_timers_all_slots(page: Page, num_slots: int = 4) -> list[dict]:
             print(f"  ℹ️ Slot #{i + 1} no existe. Fin.")
             break
 
-        team_name, league_name = get_slot_info(slots.nth(i))
+        team_name, league_name, matchday = get_slot_info(slots.nth(i))
         if not team_name:
             print(f"  ℹ️ Slot #{i + 1} vacío o no disponible. Saltando.")
             continue
@@ -393,11 +431,14 @@ def get_timers_all_slots(page: Page, num_slots: int = 4) -> list[dict]:
             print(f"  ⚠️ No se pudo forzar /Dashboard: {dash_err}")
 
         slot_timers = get_all_timers_for_slot(page)
+        slot_events = _get_events_ko(page)
         results.append({
             "slot_index":  i,
             "team_name":   team_name,
             "league_name": league_name,
+            "matchday":    matchday,
             "timers":      slot_timers,
+            "events":      slot_events,
         })
 
     print(f"\n✅ Timers extraídos de {len(results)} slot(s).")

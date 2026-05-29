@@ -1155,6 +1155,7 @@ def set_tactics_for_slot(
     from utils import click_slot_and_wait_for_dashboard, wait_for_visible_slots, get_slot_info
 
     page.goto(career_url, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(2)  # dar tiempo a que el SPA inicie antes de buscar slots
     wait_for_visible_slots(page, timeout=20000)
     time.sleep(1)
     handle_popups(page)
@@ -1163,7 +1164,7 @@ def set_tactics_for_slot(
     count = slots.count()
     target_idx = None
     for i in range(count):
-        _, slot_league = get_slot_info(slots.nth(i))
+        _, slot_league, _ = get_slot_info(slots.nth(i))
         if slot_league and league_name.lower() in slot_league.lower():
             target_idx = i
             print(f"  ✓ Slot encontrado: índice DOM {i} → '{slot_league}'")
