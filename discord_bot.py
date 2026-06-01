@@ -54,6 +54,83 @@ _last_scrape_result: list[dict]           = []
 _timer_state: dict[str, int] = {}
 _warned:      set[str]       = set()
 
+# Cola de entrenamiento: { league_name: { coach_title: player_name } }
+# Persistida en training_queue.json — el bot la carga al arrancar.
+TRAINING_QUEUE_FILE = "training_queue.json"
+_training_queue: dict[str, dict[str, str]] = {}
+
+def _load_training_queue():
+    global _training_queue
+    try:
+        if os.path.exists(TRAINING_QUEUE_FILE):
+            with open(TRAINING_QUEUE_FILE, encoding="utf-8") as f:
+                _training_queue = json.load(f)
+            print(f"✅ Cola de entrenamiento cargada ({sum(len(v) for v in _training_queue.values())} entradas)")
+    except Exception as e:
+        print(f"⚠️ No se pudo cargar {TRAINING_QUEUE_FILE}: {e}")
+
+def _save_training_queue():
+    try:
+        with open(TRAINING_QUEUE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_training_queue, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ No se pudo guardar {TRAINING_QUEUE_FILE}: {e}")
+
+def _set_queued_player(league_name: str, coach_title: str, player_name: Optional[str]):
+    if league_name not in _training_queue:
+        _training_queue[league_name] = {}
+    if player_name:
+        _training_queue[league_name][coach_title] = player_name
+    else:
+        _training_queue[league_name].pop(coach_title, None)
+    _save_training_queue()
+
+# Cola de transferibles: { league_name: [name1, name2, ...] }
+# Lista plana — sin restricción por posición. Persistida en transfer_queue.json.
+TRANSFER_QUEUE_FILE = "transfer_queue.json"
+_transfer_queue: dict[str, list[str]] = {}
+
+def _load_transfer_queue():
+    global _transfer_queue
+    try:
+        if os.path.exists(TRANSFER_QUEUE_FILE):
+            with open(TRANSFER_QUEUE_FILE, encoding="utf-8") as f:
+                _transfer_queue = json.load(f)
+            total = sum(len(v) for v in _transfer_queue.values())
+            print(f"✅ Cola de transferibles cargada ({total} candidatos)")
+    except Exception as e:
+        print(f"⚠️ No se pudo cargar {TRANSFER_QUEUE_FILE}: {e}")
+
+def _save_transfer_queue():
+    try:
+        with open(TRANSFER_QUEUE_FILE, "w", encoding="utf-8") as f:
+            json.dump(_transfer_queue, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ No se pudo guardar {TRANSFER_QUEUE_FILE}: {e}")
+
+def _get_transfer_candidates(league_name: str) -> list[str]:
+    return _transfer_queue.get(league_name, [])
+
+def _set_transfer_candidates(league_name: str, names: list[str]):
+    if names:
+        _transfer_queue[league_name] = names
+    else:
+        _transfer_queue.pop(league_name, None)
+    _save_transfer_queue()
+
+_COACH_TO_POS = {
+    "Attacking Coach":   "A",
+    "Defending Coach":   "D",
+    "Midfielder Coach":  "M",
+    "Goalkeeping Coach": "G",
+}
+_COACH_EMOJI = {
+    "Attacking Coach":   "⚡",
+    "Defending Coach":   "🛡️",
+    "Midfielder Coach":  "🔄",
+    "Goalkeeping Coach": "🧤",
+}
+
 
 # ── CLIENTE ───────────────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -142,6 +219,132 @@ def _get_referee_for_league(user_id: str, league_id: int) -> dict:
         "referee_strictness": meta.get("referee_strictness") or meta.get("strictness"),
         "matchday":           meta.get("matchday"),
     }
+
+
+def _get_recent_sales(league_id: int, limit: int = 30) -> list[dict]:
+    """Historial de ventas para alimentar al agente de transferibles."""
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT player_name, manager_name, transaction_type,
+                       position, round, final_price, created_at
+                FROM transfers
+                WHERE league_id = %s AND transaction_type = 'sale'
+                ORDER BY created_at DESC
+                LIMIT %s;
+            """, (league_id, limit))
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _get_standings_for_league(league_id: int) -> list[dict]:
+    """Clasificación actual de la liga (para el agente táctico)."""
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT standings FROM user_leagues
+                WHERE league_id = %s
+                ORDER BY last_scraped_at DESC NULLS LAST
+                LIMIT 1;
+            """, (league_id,))
+            row = cur.fetchone()
+            if not row:
+                return []
+            standings = row["standings"]
+            if isinstance(standings, str):
+                try:
+                    return json.loads(standings)
+                except Exception:
+                    return []
+            return standings or []
+    finally:
+        conn.close()
+
+
+def _get_my_team_name(league: dict) -> str:
+    """Devuelve el nombre del equipo del usuario en esta liga buscando en managers_by_team."""
+    username = os.getenv("MI_USUARIO", "").lower().strip()
+    if not username:
+        return ""
+    mgrs = league.get("managers_by_team") or {}
+    if isinstance(mgrs, str):
+        try:
+            mgrs = json.loads(mgrs)
+        except Exception:
+            mgrs = {}
+    if not isinstance(mgrs, dict):
+        return ""
+    for team_name, manager_name in mgrs.items():
+        if (manager_name or "").lower().strip() == username:
+            return team_name
+    return ""
+
+
+def _ensure_recent_results_table():
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS league_recent_results (
+                    league_id  INTEGER      NOT NULL,
+                    team_name  VARCHAR(200) NOT NULL,
+                    results    JSONB        NOT NULL DEFAULT '[]',
+                    updated_at TIMESTAMP    DEFAULT NOW(),
+                    PRIMARY KEY (league_id, team_name)
+                );
+            """)
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ No se pudo crear tabla league_recent_results: {e}")
+    finally:
+        conn.close()
+
+
+def _get_recent_results_db(league_id: int, team_name: str, limit: int = 5) -> list[dict]:
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT results FROM league_recent_results
+                WHERE league_id = %s AND lower(team_name) LIKE lower(%s)
+                ORDER BY updated_at DESC LIMIT 1;
+            """, (league_id, f"%{team_name[:30]}%"))
+            row = cur.fetchone()
+            if not row:
+                return []
+            results = row["results"]
+            if isinstance(results, str):
+                try:
+                    results = json.loads(results)
+                except Exception:
+                    results = []
+            return (results or [])[:limit]
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def _store_recent_results(league_id: int, team_name: str, results: list[dict]):
+    if not results:
+        return
+    conn = _db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO league_recent_results (league_id, team_name, results, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (league_id, team_name) DO UPDATE
+                    SET results = EXCLUDED.results, updated_at = NOW();
+            """, (league_id, team_name, json.dumps(results)))
+        conn.commit()
+    except Exception as e:
+        print(f"⚠️ _store_recent_results: {e}")
+    finally:
+        conn.close()
 
 
 def _get_recent_transfers(league_id: int, limit: int = 8) -> list[dict]:
@@ -270,7 +473,8 @@ def _scrape_renewtraining_sync(user_id: str, league_name: str) -> dict:
         with sync_playwright() as p:
             browser = launch_playwright_browser(p, headless=True)
             context, page = login_with_session_cache(browser, conn, user_id, username, password)
-            result = renew_training_for_slot(page, league_name)
+            queued = _training_queue.get(league_name) or None
+            result = renew_training_for_slot(page, league_name, queued_players=queued)
             context.close()
             browser.close()
             return result
@@ -305,7 +509,8 @@ def _scrape_renewtraining_batch_sync(user_id: str, renewals: list[tuple[str, str
             for team, league_name in renewals:
                 print(f"  [batch training] Renovando: {team} ({league_name})")
                 try:
-                    results[team] = renew_training_for_slot(page, league_name)
+                    queued = _training_queue.get(league_name) or None
+                    results[team] = renew_training_for_slot(page, league_name, queued_players=queued)
                 except Exception as e:
                     print(f"  ❌ Error renovando {team}: {e}")
                     results[team] = {"claimed": [], "started": [], "errors": [str(e)]}
@@ -390,6 +595,252 @@ def _scrape_upgradestadium_batch_sync(user_id: str,
     return results
 
 
+def _scrape_filltransferlist_sync(user_id: str, league_name: str) -> dict:
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_transferlist import fill_transferlist_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"max_slots": 4, "filled_before": 0, "added": [], "skipped": [],
+                "errors": ["no_credentials"]}
+
+    candidates = _get_transfer_candidates(league_name)
+    if not candidates:
+        return {"max_slots": 4, "filled_before": 0, "added": [], "skipped": [],
+                "errors": ["no_candidates_configured"]}
+
+    conn = _db()
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            result = fill_transferlist_for_slot(page, league_name, candidates)
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        print(f"❌ Error en fill transferlist: {e}")
+        return {"max_slots": 4, "filled_before": 0, "added": [], "skipped": [],
+                "errors": [str(e)]}
+    finally:
+        conn.close()
+
+
+def _scrape_filltransferlist_batch_sync(
+    user_id: str, renewals: list[tuple[str, str]]
+) -> dict[str, dict]:
+    """Rellena la lista de transferibles de múltiples slots en una sola sesión."""
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from action_set_transferlist import fill_transferlist_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {team: {"added": [], "errors": ["no_credentials"]} for team, _ in renewals}
+
+    conn = _db()
+    results = {}
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            for team, league_name in renewals:
+                candidates = _get_transfer_candidates(league_name)
+                if not candidates:
+                    results[team] = {"added": [], "errors": ["no_candidates"]}
+                    continue
+                try:
+                    results[team] = fill_transferlist_for_slot(page, league_name, candidates)
+                except Exception as e:
+                    print(f"  ❌ Error fill transfer {team}: {e}")
+                    results[team] = {"added": [], "errors": [str(e)]}
+            context.close()
+            browser.close()
+    except Exception as e:
+        print(f"❌ Error en batch fill transfer: {e}")
+        for team, _ in renewals:
+            if team not in results:
+                results[team] = {"added": [], "errors": [str(e)]}
+    finally:
+        conn.close()
+    return results
+
+
+def _scrape_squad_sync(user_id: str, league_name: str) -> dict:
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from scraper_squad import get_squad_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"players": [], "team_name": "", "league_name": league_name,
+                "matchday": None, "error": "no_credentials"}
+
+    conn = _db()
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            result = get_squad_for_slot(page, league_name)
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        print(f"❌ Error en scrape de plantilla: {e}")
+        return {"players": [], "team_name": "", "league_name": league_name,
+                "matchday": None, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def _scrape_spy_sync(user_id: str, league_name: str) -> dict:
+    """Activa el slot y ejecuta spy_for_slot (inicia spy o lee resultados)."""
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from scraper_data_analyst import spy_for_slot
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"action": "error", "team_name": None, "error": "no_credentials"}
+
+    conn = _db()
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            result = spy_for_slot(page, league_name)
+            context.close()
+            browser.close()
+            return result
+    except Exception as e:
+        print(f"❌ Error en spy: {e}")
+        return {"action": "error", "team_name": None, "error": str(e)}
+    finally:
+        conn.close()
+
+
+def _run_agent_transfer_sync(
+    user_id: str, league_name: str, league_id: int
+) -> dict:
+    """
+    Scrapa la plantilla actual, consulta el historial de ventas en BD y ejecuta
+    el agente LLM para decidir qué jugadores poner como candidatos de venta.
+    Actualiza _transfer_queue y lo persiste en transfer_queue.json.
+    Returns: { candidates, reasoning, error? }
+    """
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from scraper_squad import get_squad_for_slot
+    from agent_transfer import analyze_squad_for_transfers
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"candidates": [], "reasoning": "", "error": "no_credentials"}
+
+    # Obtener datos de BD (no necesitan navegador)
+    recent_sales = _get_recent_sales(league_id)
+    current_candidates = _get_transfer_candidates(league_name)
+
+    # Scraping de plantilla actual
+    conn = _db()
+    squad = []
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            slot_data = get_squad_for_slot(page, league_name)
+            squad = slot_data.get("players", [])
+            context.close()
+            browser.close()
+    except Exception as e:
+        conn.close()
+        return {"candidates": [], "reasoning": "", "error": f"scrape_failed:{e}"}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not squad:
+        return {"candidates": [], "reasoning": "", "error": "empty_squad"}
+
+    # Ejecutar agente LLM
+    try:
+        result = analyze_squad_for_transfers(
+            team_name=league_name,
+            squad=squad,
+            recent_sales=recent_sales,
+            current_listed=[],
+            current_candidates=current_candidates,
+        )
+    except Exception as e:
+        return {"candidates": [], "reasoning": "", "error": f"llm_failed:{e}"}
+
+    # Persistir decisión del agente
+    candidates = result.get("candidates", [])
+    if candidates:
+        _set_transfer_candidates(league_name, candidates)
+
+    return result
+
+
+def _run_agent_tactics_sync(
+    user_id: str, league_name: str, league_id: int, opponent_name: str
+) -> dict:
+    """
+    Obtiene datos de la BD y del scraper para ejecutar el agente táctico.
+    Returns: { formation, game_plan, ... , reasoning, error? }
+    """
+    from playwright.sync_api import sync_playwright
+    from utils import login_with_session_cache, launch_playwright_browser
+    from scraper_squad import get_squad_for_slot
+    from agent_tactics import analyze_tactics
+
+    username, password = _get_osm_credentials(user_id)
+    if not username:
+        return {"error": "no_credentials", "reasoning": ""}
+
+    standings       = _get_standings_for_league(league_id)
+    current_tactics = _get_latest_tactics(league_id) or {}
+
+    conn = _db()
+    squad = []
+    try:
+        with sync_playwright() as p:
+            browser = launch_playwright_browser(p, headless=True)
+            context, page = login_with_session_cache(browser, conn, user_id, username, password)
+            slot_data = get_squad_for_slot(page, league_name)
+            squad = slot_data.get("players", [])
+            context.close()
+            browser.close()
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return {"error": f"scrape_failed:{e}", "reasoning": ""}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not squad:
+        return {"error": "empty_squad", "reasoning": ""}
+
+    try:
+        return analyze_tactics(
+            my_team=league_name,
+            my_squad=squad,
+            my_current_tactics=current_tactics,
+            standings=standings,
+            opponent_name=opponent_name,
+        )
+    except Exception as e:
+        return {"error": f"llm_failed:{e}", "reasoning": ""}
+
+
 async def _get_timers_cached() -> list[dict]:
     """Devuelve los timers scrapeados, reutilizando resultado si tiene menos de TIMER_CHECK_MINUTES."""
     global _last_scrape_time, _last_scrape_result
@@ -418,22 +869,32 @@ def _fmt_seconds(seconds: int) -> str:
     return " ".join(parts) or "< 1m"
 
 
-def _has_upcoming_bonus_event(events: list[dict], event_type: str) -> tuple[bool, str]:
+def _has_upcoming_bonus_event(slot_events: list[dict], event_type: str) -> tuple[bool, str]:
     """
-    Devuelve (True, event_title) si hay un evento de tipo training/stadium que empieza
-    dentro de EVENT_DELAY_HOURS horas.
-    Palabras clave: en el título del evento (case-insensitive).
+    Devuelve (True, event_title) si hay un evento de tipo training/stadium que:
+      - Está activo ahora (según el scraper del foro OSM), O
+      - Empieza en menos de EVENT_DELAY_HOURS horas (foro OSM), O
+      - Aparece en los eventos KO del slot (timers en vivo del dashboard)
     """
+    from scraper_events import get_upcoming_bonus_events
+
+    # ── 1. Foro OSM (más fiable: tiene nombre, tipo y fechas exactas) ─────────
+    forum_events = get_upcoming_bonus_events(event_type, within_hours=EVENT_DELAY_HOURS)
+    if forum_events:
+        return True, forum_events[0]["name"]
+
+    # ── 2. KO en vivo del dashboard (fallback si el foro no está disponible) ──
     threshold = EVENT_DELAY_HOURS * 3600
-    kws_training = ["training", "entrenamiento", "coach", "progression", "skill", "atletismo"]
+    kws_training = ["training", "entrenamiento", "coach", "progression", "skill"]
     kws_stadium  = ["stadium", "estadio", "expansion", "build", "construction",
-                    "capacity", "pitch", "infraestructura"]
+                    "capacity", "infraestructura"]
     kws = kws_training if event_type == "training" else kws_stadium
-    for ev in events:
+    for ev in slot_events:
         title = ev.get("title", "").lower()
         secs  = ev.get("seconds", 0)
         if any(k in title for k in kws) and 0 < secs <= threshold:
             return True, ev.get("title", "")
+
     return False, ""
 
 
@@ -476,7 +937,9 @@ def embed_panel(leagues: list[dict], user_id: str) -> discord.Embed:
 
         task = _get_next_match_task(user_id, lg["league_id"])
         if task:
-            sched_at = task["scheduled_at"].replace(tzinfo=None)
+            sched_at = task["scheduled_at"]
+            if sched_at.tzinfo is None:
+                sched_at = sched_at.replace(tzinfo=timezone.utc)
             remaining = (sched_at - _utcnow()).total_seconds()
             # scheduled_at = partido + 5 min de buffer, restamos ese buffer
             partido_en = max(0, int(remaining) - 300)
@@ -660,6 +1123,234 @@ def embed_transfers(transfers: list[dict], league_name: str) -> discord.Embed:
     return embed
 
 
+def embed_spy_results(spy: dict, league_name: str) -> discord.Embed:
+    """Embed con los resultados del spy: tácticas + plantilla + últimos partidos."""
+    rival = spy.get("team_name", "Rival")
+    mgr   = spy.get("manager", "")
+    embed = discord.Embed(
+        title=f"🔍  Análisis — {rival}",
+        description=f"Liga: **{league_name}**{f'  ·  Manager: _{mgr}_' if mgr else ''}",
+        color=0xF97316,
+        timestamp=_utcnow(),
+    )
+
+    # Tácticas
+    t = spy.get("tactics") or {}
+    if t:
+        formation = t.get("formation", "?")
+        gp        = t.get("game_plan", "?")
+        tackling  = t.get("tackling", "?")
+        p_val = t.get("pressure", "?")
+        m_val = t.get("mentality", "?")
+        te_val = t.get("tempo", "?")
+        fwd = t.get("fwd", "?")
+        mid = t.get("mid", "?")
+        dfn = t.get("def", "?")
+        offside = "Sí ✅" if t.get("offside") else "No"
+        embed.add_field(
+            name="🎯 Tácticas",
+            value=(
+                f"**{formation}** · {gp} · {tackling}\n"
+                f"Presión: {p_val} · Mental: {m_val} · Tempo: {te_val}\n"
+                f"DEL: {fwd} · MED: {mid} · DEF: {dfn} · Offside: {offside}"
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(name="🎯 Tácticas", value="_No disponibles aún_", inline=False)
+
+    # Últimos partidos
+    matches = spy.get("last_matches") or []
+    if matches:
+        lines = []
+        for m in matches:
+            venue  = "🏠" if m.get("home") else "✈️"
+            opp    = m.get("opponent", "?")
+            score  = m.get("score", "?")
+            result = m.get("result", "")
+            rnd    = m.get("round", "")
+            result_icon = "✅" if result in ("W", "win")    else \
+                          "❌" if result in ("L", "loss")   else \
+                          "➖" if result in ("D", "draw")   else ""
+            rnd_str = f"J{rnd} " if rnd else ""
+            lines.append(f"{rnd_str}{venue} vs **{opp}** {score} {result_icon}")
+        embed.add_field(name="📋 Últimos partidos", value="\n".join(lines), inline=False)
+    else:
+        embed.add_field(name="📋 Últimos partidos", value="_No disponibles aún_", inline=False)
+
+    # Plantilla del rival (top 11 por stat)
+    squad = spy.get("squad") or []
+    if squad:
+        starters = [p for p in squad if p.get("in_lineup")]
+        display  = starters[:11] if starters else sorted(
+            squad, key=lambda p: max(p.get("stat_att",0), p.get("stat_def",0), p.get("stat_ovr",0)),
+            reverse=True
+        )[:11]
+        lines = []
+        for p in display:
+            name = p.get("name", "?")
+            age  = p.get("age", 0)
+            att  = p.get("stat_att", 0)
+            def_ = p.get("stat_def", 0)
+            ovr  = p.get("stat_ovr", 0)
+            lines.append(f"**{name}** ({age}) · A{att}/D{def_}/O{ovr}")
+        embed.add_field(
+            name=f"👕 Plantilla ({len(squad)} jugadores, mostrando 11 mejores)",
+            value="\n".join(lines) or "_Sin datos_",
+            inline=False,
+        )
+    else:
+        embed.add_field(name="👕 Plantilla", value="_No disponibles aún_", inline=False)
+
+    return embed
+
+
+def embed_rival_standings(rival_name: str, league_name: str,
+                           standings: list[dict], my_team: str) -> discord.Embed:
+    """Embed con posición del rival en la clasificación."""
+    rival_row = None
+    my_row    = None
+    for row in standings:
+        club = row.get("Club", "")
+        if rival_name.lower() in club.lower():
+            rival_row = row
+        if my_team.lower() in club.lower():
+            my_row = row
+
+    embed = discord.Embed(
+        title=f"📊  Rival — {rival_name}",
+        description=f"Liga: **{league_name}**",
+        color=0xF97316,
+    )
+
+    if rival_row:
+        pos    = next((i+1 for i, r in enumerate(standings) if r.get("Club","") == rival_row.get("Club","")), "?")
+        pts    = rival_row.get("Points", rival_row.get("Pts", "?"))
+        played = rival_row.get("Played", rival_row.get("P", "?"))
+        w      = rival_row.get("Won",   rival_row.get("W", "?"))
+        d      = rival_row.get("Drawn", rival_row.get("D", "?"))
+        l      = rival_row.get("Lost",  rival_row.get("L", "?"))
+        gf     = rival_row.get("GF", "?")
+        ga     = rival_row.get("GA", "?")
+        mgr    = rival_row.get("Manager", "CPU")
+        embed.add_field(
+            name=f"#{pos} {rival_name}",
+            value=f"Manager: _{mgr}_\n{pts}pts · {played}PJ · {w}V {d}E {l}D · {gf}:{ga}",
+            inline=False,
+        )
+    else:
+        embed.add_field(name=rival_name, value="_No encontrado en la clasificación_", inline=False)
+
+    if my_row:
+        pos = next((i+1 for i, r in enumerate(standings) if r.get("Club","") == my_row.get("Club","")), "?")
+        pts = my_row.get("Points", my_row.get("Pts", "?"))
+        embed.add_field(name=f"📍 Mi equipo #{pos}", value=f"{my_team} · {pts}pts", inline=True)
+
+    if standings:
+        lines = []
+        medals = {1:"🥇", 2:"🥈", 3:"🥉"}
+        for i, row in enumerate(standings[:5], 1):
+            club = row.get("Club","?")[:16]
+            pts  = row.get("Points", row.get("Pts","?"))
+            icon = medals.get(i, f"`{i}.`")
+            marker = " ←" if rival_name.lower() in club.lower() else ""
+            lines.append(f"{icon} {club} {pts}pts{marker}")
+        embed.add_field(name="Top 5", value="\n".join(lines), inline=True)
+
+    embed.set_footer(text="Usa /spy para análisis completo de tácticas y plantilla (timer 1h)")
+    return embed
+
+
+def _fmt_market_value(raw) -> str:
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (int, float)) and raw > 0:
+        if raw >= 1_000_000:
+            return f"{raw / 1_000_000:.1f}M"
+        if raw >= 1_000:
+            return f"{raw / 1_000:.0f}k"
+    return ""
+
+
+def embed_squad(slot: dict) -> discord.Embed:
+    team     = slot.get("team_name", "Equipo")
+    league   = slot.get("league_name", "")
+    matchday = slot.get("matchday")
+    players  = slot.get("players", [])
+
+    md_str = ""
+    if matchday:
+        cur, tot = matchday["current"], matchday["total"]
+        md_str = f"  ·  📅 Jornada **{cur}/{tot}**" + (" ✅" if matchday["finished"] else "")
+
+    embed = discord.Embed(
+        title=f"👕  Plantilla — {team}",
+        description=f"Liga: **{league}**{md_str} · {len(players)} jugadores",
+        color=OSM_COLOR,
+        timestamp=_utcnow(),
+    )
+
+    if not players:
+        embed.add_field(name="Sin datos", value="No se pudo leer la plantilla.", inline=False)
+        return embed
+
+    groups: dict[str, list] = {"A": [], "M": [], "D": [], "G": []}
+    for p in players:
+        pos = p.get("position", "")
+        if pos in groups:
+            groups[pos].append(p)
+
+    pos_emoji = {"A": "⚡", "M": "🔄", "D": "🛡️", "G": "🧤"}
+    pos_name  = {"A": "Delanteros", "M": "Mediocampos", "D": "Defensas", "G": "Porteros"}
+    # Stat más relevante por posición: att para delanteros, def para defensas/porteros, ovr para meds
+    main_stat_key = {"A": "stat_att", "M": "stat_ovr", "D": "stat_def", "G": "stat_def"}
+
+    for pos_key in ("A", "M", "D", "G"):
+        grp = groups[pos_key]
+        if not grp:
+            continue
+
+        lines = []
+        for p in grp:
+            num  = p.get("squad_number", "")
+            name = p.get("name", "?")
+            sp   = p.get("specific_position", "")
+            att  = p.get("stat_att", 0)
+            def_ = p.get("stat_def", 0)
+            fit  = p.get("fitness",  0)
+            mor  = p.get("morale",   0)
+            main = p.get(main_stat_key[pos_key], 0)
+
+            # Estado como iconos compactos
+            status = ""
+            if p.get("is_injured"):      status += "🏥"
+            if p.get("is_suspended"):    status += "🚫"
+            if p.get("in_training"):     status += "🏃"
+            if p.get("in_lineup"):       status += "🔵"
+            elif p.get("in_selection"):  status += "📋"
+            if p.get("is_in_form"):      status += "⚡"
+            if p.get("is_world_star"):   status += "⭐"
+            yc = p.get("yellow_cards", 0)
+            if yc > 0:                   status += "🟡" * min(yc, 2)
+
+            num_str = f"#{num}" if num else " "
+            line = f"`{num_str:>3}` **{name}** {sp} · {main} (A{att}/D{def_}) · {fit}%/{mor}% {status}".rstrip()
+            lines.append(line)
+
+        field_val = "\n".join(lines)
+        if len(field_val) > 1024:
+            field_val = field_val[:1020] + "…"
+
+        embed.add_field(
+            name=f"{pos_emoji[pos_key]} {pos_name[pos_key]} ({len(grp)})",
+            value=field_val,
+            inline=False,
+        )
+
+    embed.set_footer(text="🔵 titular  📋 suplente  🏃 entrenando  🏥 lesionado  🚫 suspendido  ⚡ en forma  ⭐ world star")
+    return embed
+
+
 # ── NOTIFICACIONES AUTOMÁTICAS ────────────────────────────────────────────────
 
 @tasks.loop(minutes=TIMER_CHECK_MINUTES)
@@ -750,6 +1441,22 @@ async def _timer_alert_loop():
 
             _timer_state[key] = seconds
 
+        # ── Detección de spy completado (OSM elimina el timer al terminar) ────
+        # El timer de Analista de datos desaparece de la lista cuando termina.
+        # Detectamos la transición: estaba activo (seconds > 0) → ahora ausente.
+        spy_key      = f"{slot_idx}_spy"
+        spy_done_key = f"{spy_key}_done"
+        current_types = {t["type"] for t in slot["timers"]}
+        if ("spy" not in current_types
+                and _timer_state.get(spy_key, 0) > 0
+                and spy_done_key not in _warned):
+            await channel.send(
+                f"🕵️ **Analista de datos** completado en **{team}**!\n"
+                f"Usa `/spy` para leer tácticas y plantilla del rival."
+            )
+            _warned.add(spy_done_key)
+            _timer_state[spy_key] = 0
+
     # ── Detección proactiva de estadio sin timer ─────────────────────────────
     # Si un slot tiene temporada activa y NO tiene ningún timer de estadio
     # (nada en construcción) → verificar si hay partes disponibles para ampliar.
@@ -809,6 +1516,100 @@ async def _timer_alert_loop():
                 await channel.send(_fmt_stadium_result(result, team))
         except Exception as e:
             await channel.send(f"❌ Error en upgrade de estadios: {e}")
+
+
+@tasks.loop(hours=2)
+async def _transferlist_loop():
+    """Cada 2 horas verifica si la lista de transferibles está llena y rellena los huecos."""
+    if not DISCORD_ALERT_CHANNEL_ID:
+        return
+    channel = client.get_channel(DISCORD_ALERT_CHANNEL_ID)
+    if not channel:
+        return
+
+    try:
+        leagues = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+    except Exception as e:
+        print(f"  ⚠️ [transfer loop] No se pudieron obtener ligas: {e}")
+        return
+
+    # Construir lista de ligas a procesar: tienen candidatos configurados y temporada activa
+    to_fill: list[tuple[str, str]] = []  # (team_name, league_name)
+    for lg in leagues:
+        league_name = lg["league_name"]
+        candidates  = _get_transfer_candidates(league_name)
+        if not candidates:
+            continue
+        to_fill.append((league_name, league_name))  # team_name = league_name aquí
+
+    if not to_fill:
+        return
+
+    try:
+        batch_results = await asyncio.to_thread(
+            _scrape_filltransferlist_batch_sync, OSM_USER_ID, to_fill
+        )
+        for team, result in batch_results.items():
+            added  = result.get("added", [])
+            errors = result.get("errors", [])
+            if added:
+                await channel.send(_fmt_transferlist_result(result, team))
+            elif "no_candidates" not in errors and "pool_exhausted" not in errors:
+                if errors:
+                    print(f"  ⚠️ [transfer loop] {team}: {errors}")
+    except Exception as e:
+        print(f"  ❌ [transfer loop] Error en batch: {e}")
+
+
+@tasks.loop(hours=24)
+async def _agent_transfer_loop():
+    """
+    Una vez al día el agente LLM analiza la plantilla y el historial de ventas
+    para decidir autónomamente qué jugadores poner como candidatos de venta.
+    Actualiza transfer_queue.json y notifica en Discord.
+    """
+    if not DISCORD_ALERT_CHANNEL_ID:
+        return
+    channel = client.get_channel(DISCORD_ALERT_CHANNEL_ID)
+    if not channel:
+        return
+
+    try:
+        leagues = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+    except Exception as e:
+        print(f"  ⚠️ [agent transfer] No se pudieron obtener ligas: {e}")
+        return
+
+    for lg in leagues:
+        league_name = lg["league_name"]
+        league_id   = lg["league_id"]
+
+        # No analizar temporadas terminadas
+        # (matchday info no está en _get_active_leagues pero lo chequeamos vía timers cache si existe)
+        try:
+            result = await asyncio.to_thread(
+                _run_agent_transfer_sync, OSM_USER_ID, league_name, league_id
+            )
+
+            if result.get("error"):
+                print(f"  ⚠️ [agent transfer] {league_name}: {result['error']}")
+                continue
+
+            candidates = result.get("candidates", [])
+            reasoning  = result.get("reasoning", "")
+
+            if candidates:
+                names_str = ", ".join(f"**{n}**" for n in candidates)
+                msg = (
+                    f"🤖 **Agente de Transferibles — {league_name}**\n"
+                    f"Candidatos actualizados: {names_str}\n"
+                    f"_{reasoning}_"
+                )
+                await channel.send(msg)
+                print(f"  ✓ [agent transfer] {league_name}: {candidates}")
+
+        except Exception as e:
+            print(f"  ❌ [agent transfer] Error en {league_name}: {e}")
 
 
 # ── VIEWS (botones interactivos) ──────────────────────────────────────────────
@@ -897,6 +1698,185 @@ class SlotDetailView(discord.ui.View):
         )
 
 
+class TrainingQueueSelect(discord.ui.Select):
+    """Select dropdown para programar el jugador de un tipo de coach específico."""
+
+    def __init__(self, coach_type: str, players: list[dict],
+                 league_name: str, current_queued: Optional[str]):
+        self.coach_type  = coach_type
+        self.league_name = league_name
+
+        pos = _COACH_TO_POS.get(coach_type, "")
+        pos_players = [p for p in players if p.get("position") == pos]
+
+        stat_key = {"A": "stat_att", "M": "stat_ovr", "D": "stat_def", "G": "stat_def"}.get(pos, "stat_ovr")
+
+        options = [
+            discord.SelectOption(
+                label="🔄 Sin cambio (reutiliza el último)",
+                value="__keep__",
+                default=(current_queued is None),
+            ),
+            discord.SelectOption(
+                label="❌ Limpiar programación",
+                value="__clear__",
+            ),
+        ]
+        for p in pos_players[:23]:
+            name   = p.get("name", "?")
+            sp     = p.get("specific_position", "")
+            age    = p.get("age", 0)
+            stat   = p.get(stat_key, 0)
+            fit    = p.get("fitness", 0)
+            flags  = ("🏥" if p.get("is_injured") else "") + ("🏃" if p.get("in_training") else "")
+            label  = f"{flags}{name} ({sp})"[:100]
+            desc   = f"{age} años · Stat {stat} · Fit {fit}%"[:100]
+            options.append(discord.SelectOption(
+                label=label,
+                description=desc,
+                value=name,
+                default=(name == current_queued),
+            ))
+
+        emoji = _COACH_EMOJI.get(coach_type, "🏋️")
+        super().__init__(
+            placeholder=f"{emoji} {coach_type}",
+            options=options,
+            min_values=1,
+            max_values=1,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        if selected in ("__keep__", "__clear__"):
+            _set_queued_player(self.league_name, self.coach_type, None)
+            msg = (f"✅ **{self.coach_type}**: reutilizará el último jugador."
+                   if selected == "__keep__"
+                   else f"✅ **{self.coach_type}**: programación borrada.")
+        else:
+            _set_queued_player(self.league_name, self.coach_type, selected)
+            msg = f"✅ **{self.coach_type}**: próxima sesión → **{selected}**"
+        await interaction.response.send_message(msg, ephemeral=True)
+
+
+class TrainingQueueView(discord.ui.View):
+    def __init__(self, league_name: str, players: list[dict]):
+        super().__init__(timeout=120)
+        for coach_type in ("Attacking Coach", "Defending Coach",
+                           "Midfielder Coach", "Goalkeeping Coach"):
+            current = _training_queue.get(league_name, {}).get(coach_type)
+            self.add_item(TrainingQueueSelect(coach_type, players, league_name, current))
+
+
+class TransferQueueSelect(discord.ui.Select):
+    """
+    Select único con todos los jugadores de la plantilla.
+    Sin restricción de posición — el usuario elige hasta 6 candidatos libres.
+    Jugadores ordenados por stat principal ascendente (los más débiles primero,
+    que son los más candidatos a vender).
+    """
+
+    def __init__(self, players: list[dict], league_name: str, current_names: list[str]):
+        self.league_name = league_name
+        current_set = {n.lower() for n in current_names}
+
+        _POS_EMOJI   = {"A": "⚡", "M": "🔄", "D": "🛡️", "G": "🧤"}
+        _STAT_KEY    = {"A": "stat_att", "M": "stat_ovr", "D": "stat_def", "G": "stat_def"}
+
+        def main_stat(p: dict) -> int:
+            return p.get(_STAT_KEY.get(p.get("position", ""), "stat_ovr"), 0)
+
+        sorted_players = sorted(players, key=main_stat)  # ascendente = más débiles primero
+
+        options = [discord.SelectOption(
+            label="🚫 Limpiar candidatos",
+            value="__clear__",
+        )]
+        for p in sorted_players[:24]:  # máx 25 opciones (24 jugadores + clear)
+            name  = p.get("name", "?")
+            sp    = p.get("specific_position", "")
+            age   = p.get("age", 0)
+            pos   = p.get("position", "")
+            stat  = main_stat(p)
+            val   = _fmt_market_value(p.get("value", 0))
+            flags = ("🏥" if p.get("is_injured") else "") + ("🏃" if p.get("in_training") else "")
+            emoji = _POS_EMOJI.get(pos, "")
+            options.append(discord.SelectOption(
+                label=f"{flags}{emoji}{name} ({sp})"[:100],
+                description=f"{age} años · Stat {stat} · {val}"[:100],
+                value=name,
+                default=(name.lower() in current_set),
+            ))
+
+        super().__init__(
+            placeholder="Elige los candidatos a transferir (máx 6, cualquier posición)",
+            options=options,
+            min_values=1,
+            max_values=min(len(sorted_players), 6),
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values
+        if "__clear__" in selected:
+            _set_transfer_candidates(self.league_name, [])
+            await interaction.response.send_message(
+                "✅ Lista de candidatos limpiada.", ephemeral=True
+            )
+        else:
+            _set_transfer_candidates(self.league_name, selected)
+            names_str = ", ".join(f"**{n}**" for n in selected)
+            await interaction.response.send_message(
+                f"✅ Candidatos guardados: {names_str}", ephemeral=True
+            )
+
+
+class TransferQueueView(discord.ui.View):
+    def __init__(self, league_name: str, players: list[dict]):
+        super().__init__(timeout=180)
+        current = _transfer_queue.get(league_name, [])
+        self.add_item(TransferQueueSelect(players, league_name, current))
+
+
+class AgentTacticsApplyView(discord.ui.View):
+    """Botones para aplicar o descartar la recomendación táctica del agente."""
+
+    def __init__(self, league_name: str, tactics: dict):
+        super().__init__(timeout=120)
+        self.league_name = league_name
+        self.tactics     = tactics
+
+    @discord.ui.button(label="✅ Aplicar táctica", style=discord.ButtonStyle.success)
+    async def apply(self, interaction: discord.Interaction, _: discord.ui.Button):
+        if not _is_owner(interaction):
+            await interaction.response.send_message("No autorizado.", ephemeral=True)
+            return
+        await interaction.response.defer(thinking=True)
+        # Filtrar solo los campos que acepta set_tactics_for_slot
+        kwargs = {k: v for k, v in self.tactics.items()
+                  if k in ("game_plan", "tackling", "pressure", "mentality", "tempo",
+                            "marking", "forwards_tactic", "midfielders_tactic",
+                            "defenders_tactic", "offside_trap")}
+        result = await asyncio.to_thread(
+            _scrape_settactics_sync, OSM_USER_ID, self.league_name, kwargs
+        )
+        self.stop()
+        if result.get("success"):
+            changed = ", ".join(result.get("changed", []))
+            await interaction.followup.send(
+                f"✅ Táctica aplicada en **{self.league_name}**: {changed}", ephemeral=True
+            )
+        else:
+            errors = ", ".join(result.get("errors", []))
+            await interaction.followup.send(
+                f"⚠️ No se pudo aplicar la táctica: `{errors}`", ephemeral=True
+            )
+
+    @discord.ui.button(label="❌ Descartar", style=discord.ButtonStyle.secondary)
+    async def discard(self, interaction: discord.Interaction, _: discord.ui.Button):
+        await interaction.response.send_message("Recomendación descartada.", ephemeral=True)
+        self.stop()
+
+
 class TacticsConfirmView(discord.ui.View):
     def __init__(self, league_name: str, kwargs: dict):
         super().__init__(timeout=60)
@@ -980,6 +1960,29 @@ def _fmt_stadium_result(result: dict, team: str) -> str:
     if errors:
         lines.append(f"  ❌ Errores: `{', '.join(errors)}`")
     lines.append(f"  💰 CF={cf:,.0f}  Savings={savings:,.0f}")
+    return "\n".join(lines)
+
+
+def _fmt_transferlist_result(result: dict, team: str) -> str:
+    added   = result.get("added", [])
+    skipped = result.get("skipped", [])
+    errors  = result.get("errors", [])
+    filled  = result.get("filled_before", 0)
+    maxs    = result.get("max_slots", 4)
+
+    if not added and not errors:
+        return f"ℹ️ Lista de transferibles completa en **{team}** ({filled}/{maxs})"
+    if not added:
+        err = ", ".join(errors)
+        return f"⚠️ No se pudo añadir jugadores en **{team}**: `{err}`"
+
+    lines = [f"💰 **Lista de transferibles actualizada — {team}** ({filled}→{filled+len(added)}/{maxs})"]
+    for name in added:
+        lines.append(f"  ✅ Añadido: **{name}**")
+    if skipped:
+        lines.append(f"  ⏭️ Sin candidatos disponibles: {len(skipped)} omitidos")
+    if errors:
+        lines.append(f"  ❌ Errores: `{', '.join(errors)}`")
     return "\n".join(lines)
 
 
@@ -1119,7 +2122,19 @@ async def cmd_timers(interaction: discord.Interaction):
             await interaction.followup.send("No se pudieron obtener timers. Revisa los logs del servidor.")
             return
         for slot_data in slots:
-            await interaction.followup.send(embed=embed_timers(slot_data))
+            matchday = slot_data.get("matchday") or {}
+            if matchday.get("finished"):
+                cur, tot = matchday["current"], matchday["total"]
+                team   = slot_data.get("team_name", "Equipo")
+                league = slot_data.get("league_name", "")
+                embed  = discord.Embed(
+                    title=f"⏱  Timers — {team}",
+                    description=f"Liga: **{league}** · 📅 Jornada **{cur}/{tot}**\n\n⛔ Temporada terminada — sin acciones automáticas.",
+                    color=ERROR_COLOR,
+                )
+                await interaction.followup.send(embed=embed)
+            else:
+                await interaction.followup.send(embed=embed_timers(slot_data))
     except Exception as e:
         await interaction.followup.send(f"❌ Error al leer timers: {e}")
 
@@ -1351,6 +2366,28 @@ async def cmd_renewtraining(interaction: discord.Interaction, slot: str = "0"):
         )
 
 
+@tree.command(name="events", description="Muestra el calendario de eventos OSM del mes")
+async def cmd_events(interaction: discord.Interaction):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        from scraper_events import fetch_events, format_events_for_discord
+        events = await asyncio.to_thread(fetch_events)
+        text = format_events_for_discord(events)
+        embed = discord.Embed(
+            title="📅 Eventos OSM — Este mes",
+            description=text,
+            color=OSM_COLOR,
+            timestamp=_utcnow(),
+        )
+        embed.set_footer(text="Fuente: forum.onlinesoccermanager.com")
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error obteniendo eventos: {e}", ephemeral=True)
+
+
 _STADIUM_PART_CHOICES = [
     app_commands.Choice(name="Entradas (Capacity)",           value="capacity"),
     app_commands.Choice(name="Campo (Pitch)",                 value="pitch"),
@@ -1457,10 +2494,412 @@ async def cmd_setlineup(
     )
 
 
+@tree.command(name="spy", description="Inicia el espionaje del próximo rival o lee resultados si ya terminó (~30s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_spy(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues     = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx         = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado.")
+            return
+        league_name = leagues[idx]["league_name"]
+        result      = await asyncio.to_thread(_scrape_spy_sync, OSM_USER_ID, league_name)
+
+        action     = result.get("action")
+        team_name  = result.get("team_name", "Rival")
+        error      = result.get("error")
+
+        if action == "error":
+            await interaction.followup.send(f"❌ Error: `{error}`")
+
+        elif action == "started":
+            cost = result.get("start_result", {}).get("cost", 0)
+            cost_str = f" (coste: {cost:,})" if cost else " (gratuito)"
+            embed = discord.Embed(
+                title=f"🔍  Spy iniciado — {team_name}",
+                description=f"Liga: **{league_name}**\n\n"
+                             f"El espionaje tardará **~1 hora** en completarse.{cost_str}\n"
+                             f"Cuando termine el timer, usa `/spy` de nuevo para leer los resultados.",
+                color=0xF97316,
+                timestamp=_utcnow(),
+            )
+            await interaction.followup.send(embed=embed)
+
+        elif action == "in_progress":
+            embed = discord.Embed(
+                title=f"⏳  Spy en curso — {team_name}",
+                description=f"Liga: **{league_name}**\n\nEl espionaje aún no terminó.\n"
+                             f"Vuelve a usar `/spy` cuando el timer de **Ojeador** quede en ✅ Listo.",
+                color=OSM_COLOR,
+            )
+            await interaction.followup.send(embed=embed)
+
+        elif action == "results":
+            spy_data = result.get("spy_result", {})
+            await interaction.followup.send(embed=embed_spy_results(spy_data, league_name))
+
+        else:
+            await interaction.followup.send(f"Estado desconocido: `{action}`")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@tree.command(name="rival", description="Análisis del próximo rival: clasificación y datos disponibles")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_rival(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues     = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx         = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado.")
+            return
+        league      = leagues[idx]
+        league_name = league["league_name"]
+        league_id   = league["league_id"]
+
+        # Datos de clasificación (rápido, sin navegador)
+        standings = await asyncio.to_thread(_get_standings_for_league, league_id)
+
+        # Scrapeamos DataAnalyst para leer el nombre del próximo rival
+        # y ver si hay resultados de spy disponibles
+        result = await asyncio.to_thread(_scrape_spy_sync, OSM_USER_ID, league_name)
+        rival_name = result.get("team_name", "")
+
+        last_matches = result.get("last_matches", [])
+        action       = result.get("action")
+
+        # Cachear resultados frescos en BD; si no hay frescos, leer del caché
+        if rival_name and last_matches:
+            await asyncio.to_thread(_store_recent_results, league_id, rival_name, last_matches)
+        elif rival_name and not last_matches:
+            last_matches = await asyncio.to_thread(_get_recent_results_db, league_id, rival_name)
+
+        if action == "results" and result.get("spy_result"):
+            # Spy completo → análisis completo con tácticas + plantilla
+            spy_data = result["spy_result"]
+            if last_matches and not spy_data.get("last_matches"):
+                spy_data["last_matches"] = last_matches
+            await interaction.followup.send(embed=embed_spy_results(spy_data, league_name))
+        else:
+            if not rival_name:
+                rival_name = "próximo rival"
+
+            my_team = _get_my_team_name(league)
+            embed = embed_rival_standings(rival_name, league_name, standings, my_team)
+
+            # Últimos partidos (siempre disponibles, sin spy)
+            if last_matches:
+                lines = []
+                for m in last_matches:
+                    venue  = "🏠" if m.get("is_home") else "✈️"
+                    opp    = m.get("away_team") if m.get("is_home") else m.get("home_team")
+                    score  = m.get("score", "?")
+                    res    = m.get("result_for_opponent", "")
+                    icon   = {"W": "✅", "D": "➖", "L": "❌"}.get(res, "")
+                    rnd    = m.get("round", "")
+                    rnd_s  = f"J{rnd} " if rnd else ""
+                    lines.append(f"{rnd_s}{venue} vs **{opp}** `{score}` {icon}")
+                embed.add_field(
+                    name=f"📋 Últimos {len(last_matches)} partidos de {rival_name}",
+                    value="\n".join(lines),
+                    inline=False,
+                )
+
+            # Nota sobre el spy
+            if action == "started":
+                extra = "\n🔍 Espionaje iniciado — usa `/spy` en ~1h para tácticas y plantilla."
+            elif action == "in_progress":
+                extra = "\n⏳ Espionaje en curso — usa `/spy` cuando el timer de **Ojeador** quede en ✅."
+            else:
+                extra = "\n💡 Usa `/spy` para obtener tácticas y plantilla completa del rival."
+            embed.description = (embed.description or "") + extra
+
+            await interaction.followup.send(embed=embed)
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@tree.command(name="settransferqueue", description="Configura qué jugadores poner en venta automáticamente (~30s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_settransferqueue(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues     = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx         = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado.")
+            return
+        league_name = leagues[idx]["league_name"]
+        slot_data   = await asyncio.to_thread(_scrape_squad_sync, OSM_USER_ID, league_name)
+        players     = slot_data.get("players", [])
+        team_name   = slot_data.get("team_name", league_name)
+
+        candidates = _get_transfer_candidates(league_name)
+        if candidates:
+            cand_str = ", ".join(f"**{n}**" for n in candidates)
+            cand_text = f"Candidatos actuales: {cand_str}"
+        else:
+            cand_text = "_Sin candidatos configurados_"
+
+        embed = discord.Embed(
+            title=f"💰  Candidatos Transferibles — {team_name}",
+            description=(
+                "Selecciona los jugadores que el bot pondrá en venta automáticamente "
+                "cuando haya slots vacíos en la lista de transferibles.\n"
+                "El bot mantiene siempre la lista llena (4 normal, 6 en Transfer Madness).\n"
+                "Sin restricción de posición — puedes elegir cualquier combinación.\n\n"
+                f"**Estado actual:** {cand_text}"
+            ),
+            color=OSM_COLOR,
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=TransferQueueView(league_name=league_name, players=players),
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@tree.command(name="filltransferlist", description="Rellena la lista de transferibles ahora con los candidatos configurados (~45s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_filltransferlist(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True, ephemeral=True)
+    try:
+        leagues     = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx         = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado.", ephemeral=True)
+            return
+        league_name = leagues[idx]["league_name"]
+        candidates  = _get_transfer_candidates(league_name)
+        if not candidates:
+            await interaction.followup.send(
+                f"⚠️ No hay candidatos configurados para **{league_name}**. "
+                "Usa `/settransferqueue` para configurarlos.",
+                ephemeral=True,
+            )
+            return
+        result = await asyncio.to_thread(_scrape_filltransferlist_sync, OSM_USER_ID, league_name)
+        await interaction.followup.send(
+            _fmt_transferlist_result(result, league_name), ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+
+@tree.command(name="agentransfer", description="Agente IA: analiza la plantilla y decide candidatos de venta (~45s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_agentransfer(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues     = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx         = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado.")
+            return
+        league_name = leagues[idx]["league_name"]
+        league_id   = leagues[idx]["league_id"]
+
+        result = await asyncio.to_thread(
+            _run_agent_transfer_sync, OSM_USER_ID, league_name, league_id
+        )
+
+        if result.get("error"):
+            await interaction.followup.send(f"❌ Error del agente: `{result['error']}`")
+            return
+
+        candidates = result.get("candidates", [])
+        reasoning  = result.get("reasoning", "")
+
+        embed = discord.Embed(
+            title=f"🤖  Agente de Transferibles — {league_name}",
+            description=reasoning or "Análisis completado.",
+            color=OSM_COLOR,
+            timestamp=_utcnow(),
+        )
+        if candidates:
+            embed.add_field(
+                name="💰 Candidatos seleccionados",
+                value="\n".join(f"• **{n}**" for n in candidates),
+                inline=False,
+            )
+            embed.set_footer(text="Transfer queue actualizado automáticamente")
+        else:
+            embed.add_field(name="Sin candidatos", value="El agente no encontró jugadores para vender.", inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@tree.command(name="agenttactics", description="Agente IA: recomienda tácticas contra un rival (~45s)")
+@app_commands.describe(
+    slot     = "Selecciona tu equipo",
+    opponent = "Nombre del equipo rival",
+)
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_agenttactics(interaction: discord.Interaction, slot: str = "0", opponent: str = ""):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+    if not opponent:
+        await interaction.response.send_message("Indica el nombre del equipo rival.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues     = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx         = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado.")
+            return
+        league_name = leagues[idx]["league_name"]
+        league_id   = leagues[idx]["league_id"]
+
+        result = await asyncio.to_thread(
+            _run_agent_tactics_sync, OSM_USER_ID, league_name, league_id, opponent
+        )
+
+        if result.get("error"):
+            await interaction.followup.send(f"❌ Error del agente: `{result['error']}`")
+            return
+
+        reasoning = result.get("reasoning", "")
+        embed = discord.Embed(
+            title=f"🤖  Táctica recomendada vs {opponent}",
+            description=f"_{reasoning}_" if reasoning else "Análisis completado.",
+            color=OSM_COLOR,
+            timestamp=_utcnow(),
+        )
+        embed.add_field(name="🗂️ Formación",      value=result.get("formation", "?"),      inline=True)
+        embed.add_field(name="📋 Plan de juego",  value=result.get("game_plan", "?"),      inline=True)
+        embed.add_field(name="⚡ Tackling",        value=result.get("tackling", "?"),       inline=True)
+        p   = result.get("pressure",  50)
+        men = result.get("mentality", 50)
+        tem = result.get("tempo",     50)
+        embed.add_field(name="📊 Sliders",
+                        value=f"Presión: **{p}** · Mentalidad: **{men}** · Tempo: **{tem}**",
+                        inline=False)
+        embed.add_field(name="⬆️ Delanteros",  value=result.get("forwards_tactic", "?"),    inline=True)
+        embed.add_field(name="➡️ Medios",       value=result.get("midfielders_tactic", "?"), inline=True)
+        embed.add_field(name="⬇️ Defensas",     value=result.get("defenders_tactic", "?"),  inline=True)
+        embed.add_field(name="🎯 Marcaje",       value=result.get("marking", "?"),           inline=True)
+        embed.add_field(name="🚩 Offside",       value="Sí ✅" if result.get("offside_trap") else "No", inline=True)
+
+        view = AgentTacticsApplyView(league_name=league_name, tactics=result)
+        await interaction.followup.send(embed=embed, view=view)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@tree.command(name="queuetraining", description="Programa qué jugadores entrenarán en la próxima sesión (~30s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_queuetraining(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado. Usa el autocompletado para seleccionarlo.")
+            return
+        league_name = leagues[idx]["league_name"]
+        slot_data   = await asyncio.to_thread(_scrape_squad_sync, OSM_USER_ID, league_name)
+        players     = slot_data.get("players", [])
+        team_name   = slot_data.get("team_name", league_name)
+
+        queue = _training_queue.get(league_name, {})
+        status_lines = []
+        for coach in ("Attacking Coach", "Defending Coach", "Midfielder Coach", "Goalkeeping Coach"):
+            emoji  = _COACH_EMOJI[coach]
+            queued = queue.get(coach)
+            status_lines.append(
+                f"{emoji} **{coach}**: → **{queued}**" if queued
+                else f"{emoji} **{coach}**: reutiliza el último jugador"
+            )
+
+        embed = discord.Embed(
+            title=f"🏋️  Programar Entrenamientos — {team_name}",
+            description=(
+                "Selecciona quién entrenará en la **próxima** sesión de cada tipo.\n"
+                "El ajuste se guarda y se aplica en cada renovación automática.\n\n"
+                + "\n".join(status_lines)
+            ),
+            color=OSM_COLOR,
+        )
+        await interaction.followup.send(
+            embed=embed,
+            view=TrainingQueueView(league_name=league_name, players=players),
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error: {e}")
+
+
+@tree.command(name="squad", description="Lee la plantilla completa de un equipo en tiempo real (~30s)")
+@app_commands.describe(slot="Selecciona tu equipo")
+@app_commands.autocomplete(slot=_slot_autocomplete)
+async def cmd_squad(interaction: discord.Interaction, slot: str = "0"):
+    if not _is_owner(interaction):
+        await interaction.response.send_message("No autorizado.", ephemeral=True)
+        return
+
+    await interaction.response.defer(thinking=True)
+    try:
+        leagues = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        idx = _slot_idx(slot, leagues)
+        if idx is None:
+            await interaction.followup.send("Equipo no encontrado. Usa el autocompletado para seleccionarlo.")
+            return
+        league_name = leagues[idx]["league_name"]
+        slot_data = await asyncio.to_thread(_scrape_squad_sync, OSM_USER_ID, league_name)
+        if slot_data.get("error") and not slot_data.get("players"):
+            await interaction.followup.send(f"❌ Error al leer plantilla: `{slot_data['error']}`")
+            return
+        await interaction.followup.send(embed=embed_squad(slot_data))
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error al leer plantilla: {e}")
+
+
 # ── EVENTOS ───────────────────────────────────────────────────────────────────
 
 @client.event
 async def on_ready():
+    _load_training_queue()
+    _load_transfer_queue()
+    await asyncio.to_thread(_ensure_recent_results_table)
     print(f"✅ Bot conectado como {client.user} (ID: {client.user.id})")
 
     if DISCORD_GUILD_ID:
@@ -1478,7 +2917,17 @@ async def on_ready():
     if DISCORD_ALERT_CHANNEL_ID:
         if not _timer_alert_loop.is_running():
             _timer_alert_loop.start()
+        if not _transferlist_loop.is_running():
+            _transferlist_loop.start()
+        # Loop del agente IA solo si está explícitamente habilitado
+        if os.getenv("ENABLE_AGENT_LOOP", "false").lower() in ("true", "1"):
+            if not _agent_transfer_loop.is_running():
+                _agent_transfer_loop.start()
+            print(f"🤖 Loop de agente de transferibles activado (cada 24h)")
+        else:
+            print(f"🤖 Agente IA: loop desactivado (ENABLE_AGENT_LOOP=false). Usa /agentransfer manualmente.")
         print(f"🔔 Alertas activadas → canal {DISCORD_ALERT_CHANNEL_ID} cada {TIMER_CHECK_MINUTES}m (aviso a {TIMER_WARNING_MINUTES}m)")
+        print(f"💰 Loop de transferibles activado (cada 2h)")
     else:
         print("🔕 Alertas desactivadas (DISCORD_ALERT_CHANNEL_ID no configurado)")
 

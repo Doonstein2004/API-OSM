@@ -355,9 +355,11 @@ def _close_modal_if_open(page: Page):
         pass
 
 
-def renew_training(page: Page) -> dict:
+def renew_training(page: Page, queued_players: dict | None = None) -> dict:
     """
-    Reclama todos los entrenamientos terminados e inicia nuevos con el mismo jugador.
+    Reclama todos los entrenamientos terminados e inicia nuevos.
+    queued_players: { "Attacking Coach": "PlayerName", ... } — si se provee, usa ese jugador
+                    en lugar del anterior. Las claves son los títulos de los slots.
     Returns: {
         "claimed":  [ { slot, title, player } ],
         "started":  [ { slot, title, player } ],
@@ -405,17 +407,21 @@ def renew_training(page: Page) -> dict:
         if s["state"] != "needs_player":
             continue
 
-        # Recuperar el jugador que estaba entrenando antes (del estado original)
+        # Jugador programado en la cola tiene prioridad sobre el anterior
         prev_player = next(
             (c["player"] for c in claimed if c["slot"] == s["index"]),
             s["playerName"] or ""
         )
+        queued_name = (queued_players or {}).get(s["title"], "")
+        player_to_use = queued_name or prev_player
+        if queued_name:
+            print(f"  → Slot {s['index']} ({s['title']}): usando jugador programado {queued_name!r}")
 
         if not _open_player_modal(page, s["index"]):
             errors.append(f"modal_failed:slot{s['index']}")
             continue
 
-        selected = _select_player_in_modal(page, prev_player)
+        selected = _select_player_in_modal(page, player_to_use)
         if selected:
             started.append({"slot": s["index"], "title": s["title"], "player": selected})
         else:
@@ -436,8 +442,10 @@ def renew_training_for_slot(
     page: Page,
     league_name: str,
     career_url: str = "https://en.onlinesoccermanager.com/Career",
+    queued_players: dict | None = None,
 ) -> dict:
-    """Activa el slot de liga indicado y renueva los entrenamientos."""
+    """Activa el slot de liga indicado y renueva los entrenamientos.
+    queued_players se pasa directamente a renew_training() para priorizar jugadores programados."""
     from utils import click_slot_and_wait_for_dashboard, wait_for_visible_slots, get_slot_info
 
     page.goto(career_url, wait_until="domcontentloaded", timeout=30000)
@@ -462,4 +470,4 @@ def renew_training_for_slot(
     if not click_slot_and_wait_for_dashboard(page, target_idx):
         return {"claimed": [], "started": [], "errors": ["slot_activation_failed"]}
 
-    return renew_training(page)
+    return renew_training(page, queued_players=queued_players)

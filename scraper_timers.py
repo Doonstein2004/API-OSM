@@ -48,14 +48,20 @@ _KEYWORD_MAP = {
     "recompensa":           "daily_login",
     # Evento
     "world 2026":           "event",
+    # Data Analyst / Spy (CountdownTimerType.SpySpying)
+    "data analyst":         "spy",
+    "data analist":         "spy",
+    "spy":                  "spy",
     # Clases CSS / ids de OSM
     "icon-training":        "training",
     "icon-timer-scout":     "scout",
+    "icon-timer-spy":       "spy",
     "icon-scout":           "scout",
     "icon-team":            "training",
     "icon-medical":         "medical",
     "icon-lawyer":          "lawyer",
     "icon-stadium":         "stadium",
+    "icon-club":            "stadium",
     "icon-match":           "next_match",
     "next-match":           "next_match",
     "icon-bosscoin":        "daily_login",
@@ -64,15 +70,24 @@ _KEYWORD_MAP = {
     # data-bind de Knockout.js
     "trainingtimer":        "training",
     "scouttimer":           "scout",
+    "spyspying":            "spy",
     "medicaltimer":         "medical",
     "lawyertimer":          "lawyer",
     "stadiumtimer":         "stadium",
     "secondsremaining":     "next_match",
+    # URLs de timerUrl (meta del Paso A KO-directo)
+    "/training":            "training",
+    "/scout":               "scout",
+    "/dataanalist":         "spy",
+    "/stadium":             "stadium",
+    "/medical":             "medical",
+    "/lawyer":              "lawyer",
 }
 
 TIMER_EMOJI = {
     "training":         "💪",
     "scout":            "🔍",
+    "spy":              "🕵️",
     "medical":          "⚕️",
     "lawyer":           "⚖️",
     "stadium":          "🏟️",
@@ -87,6 +102,7 @@ TIMER_EMOJI = {
 TIMER_LABEL_ES = {
     "training":         "Entrenamiento",
     "scout":            "Ojeador",
+    "spy":              "Analista de datos",
     "medical":          "Médico",
     "lawyer":           "Abogado",
     "stadium":          "Estadio",
@@ -218,22 +234,60 @@ def get_all_timers_for_slot(page: Page) -> list[dict]:
                     }
                 }
 
-                // 2. Lista de timers activos — solo ul.hidden-xs para evitar duplicados con visible-xs
-                const listUl = menu.querySelector('ul.hidden-xs') || menu.querySelector('ul:not(.visible-xs)');
-                if (listUl) {
-                    listUl.querySelectorAll('li.border.clickable, li.clickable').forEach(li => {
-                        const titleSpan = li.querySelector('span[data-bind*="title"], span[data-bind*="text: title"]');
-                        const timerSpan = li.querySelector('span.timer-time, span[data-bind*="secondsRemaining"]');
-                        const iconSpan  = li.querySelector('span[class*="icon-"]');
-                        const title     = titleSpan ? titleSpan.innerText.trim() : '';
-                        const countdown = timerSpan  ? timerSpan.innerText.trim()  : '';
-                        const iconClass = iconSpan   ? iconSpan.className           : '';
-                        if (title || countdown) {
-                            items.push({
-                                text: (title + ' ' + countdown).trim(),
-                                meta: iconClass.toLowerCase()
-                            });
+                // 2. Lista de timers activos.
+                //    OSM usa un carrusel CSS donde solo el "slide" activo tiene display visible.
+                //    El slide inactivo (ej. Scout/Estadio) tiene display:none → innerText = ''.
+                //    Solución: ko.dataFor(span) lee los observables KO directamente,
+                //    ignorando completamente el CSS. Funciona en slides ocultos.
+                function koV(obs) { return typeof obs === 'function' ? obs() : obs; }
+                const seenKeys = new Set();
+                let koHits = 0;
+
+                // Paso A: ko.dataFor en TODOS los spans de countdown dentro del dropdown.
+                // Captura timers de todos los slides (visibles y ocultos CSS) de todos los widgets.
+                menu.querySelectorAll('span[data-bind*="secondsRemaining"]').forEach(span => {
+                    try {
+                        const item = ko.dataFor(span);
+                        if (!item) return;
+                        const title    = koV(item.title) || '';
+                        const secs     = koV(item.secondsRemaining) || 0;
+                        const timerUrl = koV(item.timerUrl) || '';
+                        if (!title && secs === 0) return;
+                        const h  = Math.floor(secs / 3600);
+                        const m  = Math.floor((secs % 3600) / 60);
+                        const s  = secs % 60;
+                        const cd = (h ? h + 'h ' : '') + ((m || h) ? m + 'm ' : '') + s + 's';
+                        const key = title + '|' + timerUrl;
+                        if (!seenKeys.has(key)) {
+                            seenKeys.add(key);
+                            items.push({ text: (title + ' ' + cd.trim()).trim(),
+                                         meta: timerUrl.toLowerCase() });
+                            koHits++;
                         }
+                    } catch(e) {}
+                });
+
+                // Paso B: fallback DOM con textContent (no depende de CSS) si KO no dio resultados.
+                if (koHits === 0) {
+                    menu.querySelectorAll('ul.hidden-xs').forEach(ul => {
+                        ul.querySelectorAll('li.border, li.clickable').forEach(li => {
+                            if (li.id === 'previous-and-next-items') return;
+                            const titleSpan = li.querySelector('span[data-bind*="title"], span[data-bind*="text: title"]');
+                            const timerSpan = li.querySelector(
+                                'span.timer-time, span[data-bind*="secondsRemaining"], span[data-bind*="timeRemaining"]'
+                            );
+                            const iconSpan  = li.querySelector('span[class*="icon-"]');
+                            const title     = titleSpan ? (titleSpan.textContent || '').trim() : '';
+                            const countdown = timerSpan ? (timerSpan.textContent || '').trim() : '';
+                            const iconClass = iconSpan  ? iconSpan.className : '';
+                            const liBind    = li.getAttribute('data-bind') || '';
+                            const key = title + '|' + iconClass;
+                            if ((title || countdown) && !seenKeys.has(key)) {
+                                seenKeys.add(key);
+                                items.push({ text: (title + ' ' + countdown).trim(),
+                                             meta: (iconClass + ' ' + liBind).toLowerCase() });
+                            }
+                        });
                     });
                 }
 
@@ -254,17 +308,25 @@ def get_all_timers_for_slot(page: Page) -> list[dict]:
 
                 // 4. Timers inline fuera de <li> y fuera de .event-timer:
                 //    Daily Login Reward, Match Prediction
+                //    Verificar seenKeys via ko.dataFor para no duplicar items ya leídos en paso A.
                 menu.querySelectorAll('.row.timer').forEach(row => {
                     if (row.closest('.event-timer') || row.closest('li.border') || row.closest('.nextround-timer')) return;
                     const timerSpan = row.querySelector('span.timer-time, span[data-bind*="secondsRemaining"]');
                     const iconSpan  = row.querySelector('span[class*="icon-"]');
                     const boldDiv   = row.querySelector('.bold');
-                    if (timerSpan && timerSpan.innerText.trim()) {
-                        items.push({
-                            text: (boldDiv ? boldDiv.innerText.trim() + ' ' : '') + timerSpan.innerText.trim(),
-                            meta: iconSpan ? iconSpan.className.toLowerCase() : ''
-                        });
-                    }
+                    if (!timerSpan || !timerSpan.innerText.trim()) return;
+                    // Omitir si ya fue capturado por el paso A (KO-directo)
+                    try {
+                        const item = ko.dataFor(timerSpan);
+                        if (item) {
+                            const key = (koV(item.title) || '') + '|' + (koV(item.timerUrl) || '');
+                            if (seenKeys.has(key)) return;
+                        }
+                    } catch(e) {}
+                    items.push({
+                        text: (boldDiv ? boldDiv.innerText.trim() + ' ' : '') + timerSpan.innerText.trim(),
+                        meta: iconSpan ? iconSpan.className.toLowerCase() : ''
+                    });
                 });
 
                 // 5. Fallback: si todavía no hay nada, barrer todos los spans con countdown visibles
