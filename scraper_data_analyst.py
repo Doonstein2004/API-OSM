@@ -20,17 +20,40 @@ DATA_ANALYST_URL = "https://en.onlinesoccermanager.com/DataAnalist"
 
 
 def _loaded(page: Page, timeout: int = 12000) -> bool:
-    for sel in ["#spy-team-list", "[data-bind*='nextOpponentTeamPartial']",
-                "[data-bind*='teamsPartial']"]:
+    # Selectores para el estado normal (selección de equipo) y resultados disponibles
+    for sel in [
+        "#spy-team-list",
+        "[data-bind*='nextOpponentTeamPartial']",
+        "[data-bind*='teamsPartial']",
+        "[data-bind*='spyInstructionPartial']",   # resultados de spy listos
+        "[data-bind*='spyInstruction']",
+        "[data-bind*='tacticsPartial']",
+        "[data-bind*='activeSpyTeam']",
+    ]:
         try:
             page.wait_for_selector(sel, timeout=timeout, state="attached")
             return True
         except Exception:
             pass
+    # Fallback: si la URL confirma que estamos en DataAnalist, aceptar aunque
+    # los selectores KO no sean los esperados (ej. vista de resultados distinta)
+    try:
+        if "DataAnalist" in page.url or "dataanalist" in page.url.lower():
+            return True
+    except Exception:
+        pass
     return False
 
 
 def _navigate(page: Page) -> bool:
+    # Si ya estamos en DataAnalist, no navegar de nuevo
+    try:
+        if "DataAnalist" in page.url or "dataanalist" in page.url.lower():
+            if _loaded(page, timeout=3000):
+                return True
+    except Exception:
+        pass
+
     for sel in ["a[href='/DataAnalist']", "a[href*='DataAnalist']",
                 "a:has-text('Data Analyst')", "a:has-text('Analysis')"]:
         try:
