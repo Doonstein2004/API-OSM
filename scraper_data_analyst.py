@@ -20,25 +20,34 @@ DATA_ANALYST_URL = "https://en.onlinesoccermanager.com/DataAnalist"
 
 
 def _loaded(page: Page, timeout: int = 12000) -> bool:
-    # Selectores para el estado normal (selección de equipo) y resultados disponibles
     for sel in [
         "#spy-team-list",
         "[data-bind*='nextOpponentTeamPartial']",
         "[data-bind*='teamsPartial']",
-        "[data-bind*='spyInstructionPartial']",   # resultados de spy listos
+        "[data-bind*='spyInstructionPartial']",
         "[data-bind*='spyInstruction']",
         "[data-bind*='tacticsPartial']",
         "[data-bind*='activeSpyTeam']",
+        "[data-bind*='hasOngoingSpyInstruction']",
+        "[data-bind*='claimSpyInstruction']",   # spy completado sin reclamar
+        ".countdowntimer-panel",                # panel del timer de spy
     ]:
         try:
             page.wait_for_selector(sel, timeout=timeout, state="attached")
+            print(f"  ✓ DataAnalist cargado ({sel})")
             return True
         except Exception:
             pass
-    # Fallback: si la URL confirma que estamos en DataAnalist, aceptar aunque
-    # los selectores KO no sean los esperados (ej. vista de resultados distinta)
+    # URL fallback: si la URL es correcta, esperar KO bindings genéricos
     try:
         if "DataAnalist" in page.url or "dataanalist" in page.url.lower():
+            print(f"  ℹ️ DataAnalist URL ok — esperando KO bindings...")
+            time.sleep(3)
+            try:
+                page.wait_for_selector("[data-bind]", timeout=6000, state="attached")
+                print(f"  ✓ DataAnalist KO bindings detectados")
+            except Exception:
+                print(f"  ⚠️ DataAnalist sin KO bindings — aceptando por URL")
             return True
     except Exception:
         pass
@@ -46,7 +55,6 @@ def _loaded(page: Page, timeout: int = 12000) -> bool:
 
 
 def _navigate(page: Page) -> bool:
-    # Si ya estamos en DataAnalist, no navegar de nuevo
     try:
         if "DataAnalist" in page.url or "dataanalist" in page.url.lower():
             if _loaded(page, timeout=3000):
@@ -67,10 +75,13 @@ def _navigate(page: Page) -> bool:
             pass
 
     try:
+        print(f"  → Navegando a {DATA_ANALYST_URL}...")
         page.goto(DATA_ANALYST_URL, wait_until="domcontentloaded", timeout=30000)
         time.sleep(2)
         handle_popups(page)
-        return _loaded(page)
+        loaded = _loaded(page)
+        print(f"  → _loaded={loaded}  url={page.url}")
+        return loaded
     except Exception as e:
         print(f"  ⚠️ No se pudo navegar a DataAnalist: {e}")
         return False
@@ -97,122 +108,194 @@ def get_data_analyst_state(page: Page) -> dict:
     handle_popups(page)
 
     try:
-        return page.evaluate("""
+        result = page.evaluate("""
             () => {
                 function v(obs) { return typeof obs === 'function' ? obs() : obs; }
                 function safeB(obs) { try { return !!v(obs); } catch(e) { return false; } }
-                function teamInfoKO(t) {
-                    if (!t) return null;
-                    const mgr = v(t.managerPartial);
-                    const spy = v(t.spyInstructionPartial);
+
+                function teamInfoFromItem(item) {
+                    if (!item) return null;
+                    const name = v(item.name) || '';
+                    if (!name) return null;
+                    const mgr = v(item.managerPartial);
+                    const spy = v(item.spyInstructionPartial);
                     return {
-                        name:               v(t.name) || '',
+                        name,
                         manager_name:       mgr ? (v(mgr.name) || '') : '',
-                        has_spy_running:    safeB(t.hasOngoingSpyInstruction),
+                        has_spy_running:    safeB(item.hasOngoingSpyInstruction),
                         spy_done:           !!spy,
-                        on_secret_training: safeB(t.onSecretTraining),
+                        on_secret_training: safeB(item.onSecretTraining),
                     };
                 }
 
-                // Buscar root KO con múltiples estrategias
-                function findKORoot() {
-                    const selectors = [
-                        '#spy-team-list',
-                        '[data-bind*="nextOpponentTeam"]',
-                        '[data-bind*="teamsPartial"]',
-                        '[data-bind*="spyTeam"]',
-                        '[data-bind*="activeSpyTeam"]',
-                    ];
-                    for (const sel of selectors) {
-                        const el = document.querySelector(sel);
-                        if (!el) continue;
-                        const ctx = ko.contextFor(el);
-                        if (!ctx) continue;
-                        const r = ctx.$root || ctx.$data;
-                        if (r && (typeof r.nextOpponentTeamPartial !== 'undefined' ||
-                                  typeof r.teamsPartial !== 'undefined')) return r;
-                    }
-                    const bodyCtx = ko.contextFor(document.body);
-                    return bodyCtx ? (bodyCtx.$root || bodyCtx.$data) : null;
-                }
-                const root = findKORoot();
-
+                // Estrategia A: ko.dataFor directo sobre elementos con bindings de equipo.
+                // No depende del root viewmodel — más robusto cuando ko.contextFor(body) falla.
+                const seenNames = new Set();
+                const teams = [];
                 let nextOppInfo = null;
                 let activeSpyName = null;
-                let teams = [];
 
-                if (root) {
-                    const nextOppKO = v(root.nextOpponentTeamPartial);
-                    if (nextOppKO) nextOppInfo = teamInfoKO(nextOppKO);
-
-                    const activeSpy = v(root.activeSpyTeam);
-                    if (activeSpy) activeSpyName = v(activeSpy.name) || null;
-
-                    const teamsP = v(root.teamsPartial);
-                    if (teamsP && typeof teamsP.getOrderedBySpy === 'function') {
-                        teams = teamsP.getOrderedBySpy().map(teamInfoKO).filter(Boolean);
-                    }
+                const teamSelectors = [
+                    '[data-bind*="hasOngoingSpyInstruction"]',
+                    '[data-bind*="spyInstructionPartial"]',
+                    '[data-bind*="nextOpponentTeamPartial"]',
+                    '#spy-team-list [data-bind*="name"]',
+                ];
+                for (const sel of teamSelectors) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        try {
+                            const item = ko.dataFor(el);
+                            if (!item) return;
+                            const info = teamInfoFromItem(item);
+                            if (!info || seenNames.has(info.name)) return;
+                            seenNames.add(info.name);
+                            teams.push(info);
+                            if (info.has_spy_running) activeSpyName = info.name;
+                        } catch(e) {}
+                    });
+                    if (teams.length > 0) break;
                 }
 
-                // Fallback DOM: leer el próximo rival directamente del HTML
-                // El próximo rival está en .row-grid-fix-top (primer bloque grande)
-                // Los demás equipos están en .row-grid-fix-bottom (grilla de miniaturas)
+                // Estrategia B: root viewmodel como segundo intento
+                if (!teams.length || !nextOppInfo) {
+                    try {
+                        const spyEl = document.querySelector('#spy-team-list') || document.body;
+                        const ctx   = ko.contextFor(spyEl);
+                        const root  = ctx && (ctx.$root || ctx.$data);
+                        if (root) {
+                            const nextOppKO = v(root.nextOpponentTeamPartial);
+                            if (nextOppKO) {
+                                const info = teamInfoFromItem(nextOppKO);
+                                if (info && info.name) nextOppInfo = info;
+                            }
+                            if (!activeSpyName) {
+                                const as = v(root.activeSpyTeam);
+                                if (as) activeSpyName = v(as.name) || null;
+                            }
+                            if (!teams.length) {
+                                const teamsP = v(root.teamsPartial);
+                                if (teamsP && typeof teamsP.getOrderedBySpy === 'function') {
+                                    teamsP.getOrderedBySpy().forEach(t => {
+                                        const info = teamInfoFromItem(t);
+                                        if (info && !seenNames.has(info.name)) {
+                                            seenNames.add(info.name);
+                                            teams.push(info);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                }
+
+                // Si hay equipos de la estrategia A pero no nextOppInfo, inferir
+                if (!nextOppInfo && teams.length > 0) {
+                    nextOppInfo = teams.find(t => t.has_spy_running || t.spy_done) || teams[0];
+                }
+
+                // Fallback DOM
                 if (!nextOppInfo || !nextOppInfo.name) {
-                    const topRow = document.querySelector(
-                        '#spy-team-list .row-grid-fix-top'
-                    );
+                    const topRow = document.querySelector('#spy-team-list .row-grid-fix-top');
                     if (topRow) {
                         const nameEl = topRow.querySelector('.club-name');
-                        const mgrEl  = topRow.querySelector(
-                            '.club-text-container-managername, [data-bind*="managerPartial"] [data-bind*="name"]'
-                        );
-                        const panel  = topRow.querySelector('.panel.clickable');
-                        const spyRunning = !panel; // si no hay panel clickable, el spy está en curso
                         if (nameEl && nameEl.innerText.trim()) {
                             nextOppInfo = {
-                                name:               nameEl.innerText.trim(),
-                                manager_name:       mgrEl ? mgrEl.innerText.trim() : '',
-                                has_spy_running:    spyRunning,
-                                spy_done:           false,
-                                on_secret_training: false,
-                                _source:            'dom',
+                                name:            nameEl.innerText.trim(),
+                                manager_name:    '',
+                                has_spy_running: !topRow.querySelector('.panel.clickable'),
+                                spy_done:        false, _source: 'dom',
                             };
                         }
                     }
                 }
-
-                // Fallback DOM para los equipos de la liga (grilla inferior)
-                if (!teams.length) {
-                    const bottomPanels = document.querySelectorAll(
-                        '#spy-team-list .row-grid-fix-bottom .panel.clickable'
+                if (!activeSpyName) {
+                    const clubEl = document.querySelector(
+                        '#spy-team-list .club-name, .dataanalist-spy-header .club-name'
                     );
-                    bottomPanels.forEach(panel => {
-                        const nameEl = panel.querySelector('.club-name');
-                        const mgrEl  = panel.querySelector('[data-bind*="name"]');
-                        if (nameEl) {
-                            teams.push({
-                                name:               nameEl.innerText.trim(),
-                                manager_name:       mgrEl ? mgrEl.innerText.trim() : '',
-                                has_spy_running:    false,
-                                spy_done:           false,
-                                on_secret_training: false,
-                                _source:            'dom',
-                            });
-                        }
+                    if (clubEl && clubEl.innerText.trim()) activeSpyName = clubEl.innerText.trim();
+                }
+                if (!teams.length) {
+                    document.querySelectorAll('#spy-team-list .row-grid-fix-bottom .panel.clickable').forEach(p => {
+                        const n = p.querySelector('.club-name');
+                        if (n) teams.push({ name: n.innerText.trim(), manager_name: '',
+                                            has_spy_running: false, spy_done: false, _source: 'dom' });
                     });
                 }
 
-                return {
-                    next_opponent:   nextOppInfo,
-                    teams:           teams,
-                    active_spy_team: activeSpyName,
-                };
+                // Detectar botón "Complete" del spy terminado-sin-reclamar
+                let spyNeedsClaim = false;
+                const claimBtn = document.querySelector('button[data-bind*="claimSpyInstruction"]');
+                if (claimBtn && claimBtn.offsetParent !== null) {
+                    spyNeedsClaim = true;
+                    // Obtener nombre del equipo via contexto KO del botón
+                    try {
+                        const ctx = ko.contextFor(claimBtn);
+                        if (ctx && ctx.$parents && ctx.$parents.length > 1) {
+                            const teamObj = ctx.$parents[1];
+                            const tname = v(teamObj.name) || v(teamObj.teamName) || '';
+                            if (tname && !activeSpyName) activeSpyName = tname;
+                        }
+                    } catch(e) {}
+                }
+
+                return { next_opponent: nextOppInfo, teams, active_spy_team: activeSpyName,
+                         spy_needs_claim: spyNeedsClaim };
             }
-        """) or {"next_opponent": None, "teams": [], "active_spy_team": None}
+        """) or {"next_opponent": None, "teams": [], "active_spy_team": None, "spy_needs_claim": False}
+        nxt = result.get("next_opponent") or {}
+        print(f"  → DataAnalist state: next='{nxt.get('name','')}' spy_done={nxt.get('spy_done')} active='{result.get('active_spy_team')}' teams={len(result.get('teams',[]))}")
+        # Diagnóstico cuando no se encuentra nada — muestra qué bindings hay en la página
+        if not result.get("teams") and not nxt.get("name"):
+            try:
+                diag = page.evaluate("""
+                    () => {
+                        const els = Array.from(document.querySelectorAll('[data-bind]'));
+                        const binds = els.map(e => e.getAttribute('data-bind').trim().slice(0,90)).slice(0, 12);
+                        const koKeys = [];
+                        let i = 0;
+                        for (const el of els) {
+                            if (i++ > 20) break;
+                            try {
+                                const d = ko.dataFor(el);
+                                if (d && typeof d === 'object') {
+                                    const keys = Object.keys(d).join(',');
+                                    if (keys && !koKeys.includes(keys)) koKeys.push(keys.slice(0,120));
+                                }
+                            } catch(e) {}
+                        }
+                        return { bindCount: els.length, firstBinds: binds, koKeysets: koKeys.slice(0,4) };
+                    }
+                """) or {}
+                print(f"  🔍 [diag] bindCount={diag.get('bindCount')} firstBinds={diag.get('firstBinds')} koKeysets={diag.get('koKeysets')}")
+            except Exception as de:
+                print(f"  🔍 [diag error] {de}")
+        return result
     except Exception as e:
         print(f"  ⚠️ get_data_analyst_state: {e}")
         return {"next_opponent": None, "teams": [], "active_spy_team": None,
                 "error": str(e)}
+
+
+# ── RECLAMAR SPY COMPLETADO ───────────────────────────────────────────────────
+
+def _claim_spy(page: Page) -> bool:
+    """
+    Clickea el botón 'Complete' cuando el timer del spy terminó pero aún no fue reclamado.
+    Retorna True si se hizo clic con éxito.
+    """
+    try:
+        btn = page.locator('button[data-bind*="claimSpyInstruction"]').first
+        if btn.count() == 0 or not btn.is_visible(timeout=2000):
+            return False
+        print("  → Reclamando spy completado (botón Complete)...")
+        btn.click()
+        time.sleep(3)
+        handle_popups(page)
+        print("  ✓ Spy reclamado")
+        return True
+    except Exception as e:
+        print(f"  ⚠️ _claim_spy: {e}")
+        return False
 
 
 # ── INICIAR ESPIONAJE ─────────────────────────────────────────────────────────
@@ -495,105 +578,6 @@ def get_spy_results(page: Page, team_name: str | None = None) -> dict:
                 "error": str(e)}
 
 
-# ── ÚLTIMOS PARTIDOS DEL RIVAL (desde la página de resultados de la liga) ────
-
-def get_opponent_recent_matches(page: Page, opponent_name: str, limit: int = 5) -> list[dict]:
-    """
-    Navega a /League/Results y extrae los últimos `limit` partidos en los que
-    aparece `opponent_name` como local o visitante.
-
-    No depende del spy — funciona inmediatamente con datos de la liga.
-
-    Returns: [{ round, home_team, away_team, score, result_for_opponent, is_home }]
-    """
-    RESULTS_URL = "https://en.onlinesoccermanager.com/League/Results"
-
-    # Intentar navegar via SPA primero
-    for sel in ["a[href*='League/Results']", "a[href*='/Results']"]:
-        try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=800):
-                loc.click()
-                try:
-                    page.wait_for_selector("table.table-sticky", timeout=8000)
-                    break
-                except Exception:
-                    pass
-        except Exception:
-            pass
-    else:
-        try:
-            page.goto(RESULTS_URL, wait_until="domcontentloaded", timeout=30000)
-            time.sleep(2)
-            page.wait_for_selector("table.table-sticky", timeout=10000)
-        except Exception as e:
-            print(f"  ⚠️ get_opponent_recent_matches: no se pudo cargar resultados: {e}")
-            return []
-
-    time.sleep(1)
-    handle_popups(page)
-
-    try:
-        matches = page.evaluate(f"""
-            (function() {{
-                const target = {repr(opponent_name.lower())};
-                const results = [];
-
-                // Buscar en todas las tablas de resultados (puede haber varias por jornada)
-                const rows = document.querySelectorAll('table.table-sticky tr:not(.thead)');
-                for (const row of rows) {{
-                    const cells = Array.from(row.querySelectorAll('td'));
-                    if (cells.length < 3) continue;
-
-                    // Estructura típica: [round/jornada] [home_team] [score] [away_team]
-                    // o [home_team] [score] [away_team] dependiendo de la vista
-                    const texts = cells.map(c => c.innerText.trim());
-
-                    // Identificar score (contiene -)
-                    let scoreIdx = texts.findIndex(t => /^\\d+\\s*-\\s*\\d+$/.test(t));
-                    if (scoreIdx === -1) scoreIdx = texts.findIndex(t => /^\\d+-\\d+$/.test(t));
-                    if (scoreIdx === -1) continue;
-
-                    const homeTeam  = texts[scoreIdx - 1] || '';
-                    const awayTeam  = texts[scoreIdx + 1] || '';
-                    const score     = texts[scoreIdx];
-                    const roundText = texts[0] !== homeTeam ? texts[0] : '';
-
-                    const homeL = homeTeam.toLowerCase();
-                    const awayL = awayTeam.toLowerCase();
-
-                    if (!homeL.includes(target) && !awayL.includes(target)) continue;
-
-                    const isHome   = homeL.includes(target);
-                    const myGoals  = isHome ? parseInt(score.split('-')[0]) : parseInt(score.split('-')[1]);
-                    const oooGoals = isHome ? parseInt(score.split('-')[1]) : parseInt(score.split('-')[0]);
-                    const result   = myGoals > oooGoals ? 'W' : myGoals < oooGoals ? 'L' : 'D';
-
-                    results.push({{
-                        round:      roundText,
-                        home_team:  homeTeam,
-                        away_team:  awayTeam,
-                        score:      score,
-                        is_home:    isHome,
-                        result_for_opponent: result,
-                        my_goals:   myGoals,
-                        opp_goals:  oooGoals,
-                    }});
-                }}
-                return results;
-            }})()
-        """) or []
-
-        # Los resultados suelen estar en orden cronológico inverso (más recientes primero)
-        recent = matches[:limit]
-        print(f"  ✓ {len(recent)} partido(s) de {opponent_name!r} encontrados")
-        return recent
-
-    except Exception as e:
-        print(f"  ⚠️ get_opponent_recent_matches eval: {e}")
-        return []
-
-
 # ── ORQUESTADOR: START + RESULTADOS EN UN SOLO SLOT ──────────────────────────
 
 def spy_for_slot(
@@ -647,47 +631,48 @@ def spy_for_slot(
         return {"action": "error", "team_name": None,
                 "error": state["error"]}
 
+    # Spy terminado pero sin reclamar → clickear "Complete" primero
+    if state.get("spy_needs_claim"):
+        team_name_claim = state.get("active_spy_team") or ""
+        if _claim_spy(page):
+            # Re-leer estado después de reclamar
+            state = get_data_analyst_state(page)
+            if not state.get("active_spy_team") and team_name_claim:
+                state["active_spy_team"] = team_name_claim
+
     next_opp    = state.get("next_opponent") or {}
     active_spy  = state.get("active_spy_team")
     opp_name    = next_opp.get("name", "")
 
-    # Siempre incluimos los últimos partidos del rival desde la página de resultados
-    # (esto funciona sin spy, inmediatamente)
-    last_matches = []
-    if opp_name:
-        last_matches = get_opponent_recent_matches(page, opp_name)
-
     # ¿Hay resultados de spy disponibles?
     if read_results_if_done:
-        for team in [next_opp] + state.get("teams", []):
+        # Si el spy fue reclamado, buscar resultados por el nombre guardado
+        candidates = ([next_opp] + state.get("teams", []))
+        if active_spy and not any(t.get("name") == active_spy for t in candidates if t):
+            candidates.append({"name": active_spy, "spy_done": True})
+        for team in candidates:
             if team and team.get("spy_done"):
                 result = get_spy_results(page, team.get("name"))
                 if not result.get("error"):
-                    # Enriquecer con los últimos partidos del resultado de resultados de liga
-                    if last_matches and not result.get("last_matches"):
-                        result["last_matches"] = last_matches
                     return {"action": "results", "team_name": team["name"],
-                            "spy_result": result, "last_matches": last_matches}
+                            "spy_result": result}
 
     # ¿Hay un spy en curso?
     if active_spy:
-        return {"action": "in_progress", "team_name": active_spy,
-                "last_matches": last_matches}
+        return {"action": "in_progress", "team_name": active_spy}
 
     # ¿El próximo rival ya tiene spy en ejecución?
     if next_opp.get("has_spy_running"):
-        return {"action": "in_progress", "team_name": opp_name,
-                "last_matches": last_matches}
+        return {"action": "in_progress", "team_name": opp_name}
 
     # Sin rival conocido no podemos iniciar spy
     if not opp_name:
-        return {"action": "error", "team_name": None,
-                "error": "no_next_opponent", "last_matches": last_matches}
+        return {"action": "error", "team_name": None, "error": "no_next_opponent"}
 
     # Iniciar spy en el próximo rival
     start_result = start_spy(page, opp_name)
     if start_result["started"]:
         return {"action": "started", "team_name": opp_name,
-                "start_result": start_result, "last_matches": last_matches}
+                "start_result": start_result}
     return {"action": "error", "team_name": opp_name,
-            "error": start_result.get("error"), "last_matches": last_matches}
+            "error": start_result.get("error")}

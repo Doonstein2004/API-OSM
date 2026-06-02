@@ -235,35 +235,70 @@ def get_all_timers_for_slot(page: Page) -> list[dict]:
                 }
 
                 // 2. Lista de timers activos.
-                //    OSM usa un carrusel CSS donde solo el "slide" activo tiene display visible.
-                //    El slide inactivo (ej. Scout/Estadio) tiene display:none → innerText = ''.
-                //    Solución: ko.dataFor(span) lee los observables KO directamente,
-                //    ignorando completamente el CSS. Funciona en slides ocultos.
+                //    Problema: span[data-bind*="secondsRemaining"] solo existe cuando
+                //    timerState === InProgress. Timers FINISHED no tienen ese span,
+                //    por lo que ko.dataFor(span) los pierde completamente.
+                //    Solución: leer pageItems del viewmodel padre del foreach via
+                //    ko.contextFor(firstLi).$parent — incluye items en cualquier estado.
                 function koV(obs) { return typeof obs === 'function' ? obs() : obs; }
                 const seenKeys = new Set();
                 let koHits = 0;
 
-                // Paso A: ko.dataFor en TODOS los spans de countdown dentro del dropdown.
-                // Captura timers de todos los slides (visibles y ocultos CSS) de todos los widgets.
+                function pushTimerItem(item) {
+                    const title    = koV(item.title) || '';
+                    const secs     = koV(item.secondsRemaining) || 0;
+                    const timerUrl = koV(item.timerUrl) || '';
+                    if (!title) return;
+                    const key = title + '|' + timerUrl;
+                    if (seenKeys.has(key)) return;
+                    seenKeys.add(key);
+                    let cd;
+                    if (secs > 0) {
+                        const h = Math.floor(secs / 3600);
+                        const m = Math.floor((secs % 3600) / 60);
+                        const s = secs % 60;
+                        cd = (h ? h + 'h ' : '') + ((m || h) ? m + 'm ' : '') + s + 's';
+                    } else {
+                        cd = 'Listo';
+                    }
+                    items.push({ text: (title + ' ' + cd).trim(), meta: timerUrl.toLowerCase() });
+                    koHits++;
+                }
+
+                // Paso A: pageItems via contexto padre del foreach.
+                // ko.contextFor(li).$parent = viewmodel que tiene pageItems, goToNextPage, etc.
+                // Captura timers en estado InProgress Y Finished (para timer "Listo").
+                Array.from(menu.querySelectorAll('ul.hidden-xs')).forEach(ul => {
+                    const firstLi = ul.querySelector('li.border, li.clickable');
+                    if (!firstLi) return;
+                    let widgetVm = null;
+                    try {
+                        const ctx = ko.contextFor(firstLi);
+                        widgetVm = ctx && ctx.$parent;
+                    } catch(e) {}
+                    if (!widgetVm || typeof widgetVm.pageItems !== 'function') return;
+                    // Ir a la primera página
+                    let safety = 0;
+                    while (typeof widgetVm.isGoToPreviousPageDisabled === 'function' &&
+                           !widgetVm.isGoToPreviousPageDisabled() && safety++ < 10) {
+                        widgetVm.goToPreviousPage();
+                    }
+                    // Leer todas las páginas
+                    safety = 0;
+                    while (safety++ < 20) {
+                        (koV(widgetVm.pageItems) || []).forEach(pushTimerItem);
+                        if (typeof widgetVm.isGoToNextPageDisabled === 'function' &&
+                            widgetVm.isGoToNextPageDisabled()) break;
+                        widgetVm.goToNextPage();
+                    }
+                });
+
+                // Paso A2: spans de countdown para items fuera de ul.hidden-xs
+                // (ej. recompensa diaria, predicción de partido).
                 menu.querySelectorAll('span[data-bind*="secondsRemaining"]').forEach(span => {
                     try {
                         const item = ko.dataFor(span);
-                        if (!item) return;
-                        const title    = koV(item.title) || '';
-                        const secs     = koV(item.secondsRemaining) || 0;
-                        const timerUrl = koV(item.timerUrl) || '';
-                        if (!title && secs === 0) return;
-                        const h  = Math.floor(secs / 3600);
-                        const m  = Math.floor((secs % 3600) / 60);
-                        const s  = secs % 60;
-                        const cd = (h ? h + 'h ' : '') + ((m || h) ? m + 'm ' : '') + s + 's';
-                        const key = title + '|' + timerUrl;
-                        if (!seenKeys.has(key)) {
-                            seenKeys.add(key);
-                            items.push({ text: (title + ' ' + cd.trim()).trim(),
-                                         meta: timerUrl.toLowerCase() });
-                            koHits++;
-                        }
+                        if (item) pushTimerItem(item);
                     } catch(e) {}
                 });
 

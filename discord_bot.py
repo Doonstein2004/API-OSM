@@ -283,66 +283,42 @@ def _get_my_team_name(league: dict) -> str:
     return ""
 
 
-def _ensure_recent_results_table():
+def _get_recent_matches_db(league_id: int, opponent_name: str, limit: int = 5) -> list[dict]:
+    """Últimos partidos del rival desde la tabla matches."""
     conn = _db()
     try:
         with conn.cursor() as cur:
+            pattern = f"%{opponent_name}%"
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS league_recent_results (
-                    league_id  INTEGER      NOT NULL,
-                    team_name  VARCHAR(200) NOT NULL,
-                    results    JSONB        NOT NULL DEFAULT '[]',
-                    updated_at TIMESTAMP    DEFAULT NOW(),
-                    PRIMARY KEY (league_id, team_name)
-                );
-            """)
-        conn.commit()
+                SELECT round, home_team, home_goals, away_team, away_goals, played_at
+                FROM matches
+                WHERE league_id = %s
+                  AND (lower(home_team) LIKE lower(%s)
+                       OR lower(away_team) LIKE lower(%s))
+                ORDER BY round DESC
+                LIMIT %s;
+            """, (league_id, pattern, pattern, limit))
+            rows = cur.fetchall()
+            results = []
+            for r in rows:
+                is_home   = opponent_name.lower() in (r["home_team"] or "").lower()
+                my_goals  = r["home_goals"] if is_home else r["away_goals"]
+                opp_goals = r["away_goals"] if is_home else r["home_goals"]
+                result    = "W" if my_goals > opp_goals else ("L" if my_goals < opp_goals else "D")
+                results.append({
+                    "round":               r["round"],
+                    "home_team":           r["home_team"],
+                    "away_team":           r["away_team"],
+                    "score":               f"{r['home_goals']}-{r['away_goals']}",
+                    "is_home":             is_home,
+                    "result_for_opponent": result,
+                    "my_goals":            my_goals,
+                    "opp_goals":           opp_goals,
+                })
+            return results
     except Exception as e:
-        print(f"⚠️ No se pudo crear tabla league_recent_results: {e}")
-    finally:
-        conn.close()
-
-
-def _get_recent_results_db(league_id: int, team_name: str, limit: int = 5) -> list[dict]:
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT results FROM league_recent_results
-                WHERE league_id = %s AND lower(team_name) LIKE lower(%s)
-                ORDER BY updated_at DESC LIMIT 1;
-            """, (league_id, f"%{team_name[:30]}%"))
-            row = cur.fetchone()
-            if not row:
-                return []
-            results = row["results"]
-            if isinstance(results, str):
-                try:
-                    results = json.loads(results)
-                except Exception:
-                    results = []
-            return (results or [])[:limit]
-    except Exception:
+        print(f"⚠️ _get_recent_matches_db: {e}")
         return []
-    finally:
-        conn.close()
-
-
-def _store_recent_results(league_id: int, team_name: str, results: list[dict]):
-    if not results:
-        return
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO league_recent_results (league_id, team_name, results, updated_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (league_id, team_name) DO UPDATE
-                    SET results = EXCLUDED.results, updated_at = NOW();
-            """, (league_id, team_name, json.dumps(results)))
-        conn.commit()
-    except Exception as e:
-        print(f"⚠️ _store_recent_results: {e}")
     finally:
         conn.close()
 
@@ -1228,7 +1204,7 @@ def embed_rival_standings(rival_name: str, league_name: str,
         pts    = rival_row.get("Points", rival_row.get("Pts", "?"))
         played = rival_row.get("Played", rival_row.get("P", "?"))
         w      = rival_row.get("Won",   rival_row.get("W", "?"))
-        d      = rival_row.get("Drawn", rival_row.get("D", "?"))
+        d      = rival_row.get("Drew", rival_row.get("Drawn", rival_row.get("D", "?")))
         l      = rival_row.get("Lost",  rival_row.get("L", "?"))
         gf     = rival_row.get("GF", "?")
         ga     = rival_row.get("GA", "?")
@@ -2512,12 +2488,23 @@ async def cmd_spy(interaction: discord.Interaction, slot: str = "0"):
         league_name = leagues[idx]["league_name"]
         result      = await asyncio.to_thread(_scrape_spy_sync, OSM_USER_ID, league_name)
 
-        action     = result.get("action")
-        team_name  = result.get("team_name", "Rival")
-        error      = result.get("error")
+        action    = result.get("action")
+        team_name = result.get("team_name") or "Rival"
+        error     = result.get("error")
 
+        # Si DataAnalyst no pudo leer el estado pero hay un timer de spy activo,
+        # el spy está en curso — no mostrar error.
         if action == "error":
-            await interaction.followup.send(f"❌ Error: `{error}`")
+            spy_timer_active = any(
+                t.get("type") == "spy" and t.get("seconds", 0) > 0
+                for slot in _last_scrape_result
+                if slot.get("league_name", "") == league_name
+                for t in slot.get("timers", [])
+            )
+            if spy_timer_active:
+                action = "in_progress"
+            else:
+                await interaction.followup.send(f"❌ Error: `{error}`")
 
         elif action == "started":
             cost = result.get("start_result", {}).get("cost", 0)
@@ -2578,15 +2565,24 @@ async def cmd_rival(interaction: discord.Interaction, slot: str = "0"):
         # y ver si hay resultados de spy disponibles
         result = await asyncio.to_thread(_scrape_spy_sync, OSM_USER_ID, league_name)
         rival_name = result.get("team_name", "")
+        action     = result.get("action")
 
-        last_matches = result.get("last_matches", [])
-        action       = result.get("action")
+        # Si DataAnalyst no pudo leer el rival pero hay un timer de spy activo
+        # en el cache de timers, inferir que el spy está en curso.
+        if not rival_name or action == "error":
+            spy_timer_active = any(
+                t.get("type") == "spy" and t.get("seconds", 0) > 0
+                for slot in _last_scrape_result
+                if slot.get("league_name", "") == league_name
+                for t in slot.get("timers", [])
+            )
+            if spy_timer_active:
+                action = "in_progress"
 
-        # Cachear resultados frescos en BD; si no hay frescos, leer del caché
-        if rival_name and last_matches:
-            await asyncio.to_thread(_store_recent_results, league_id, rival_name, last_matches)
-        elif rival_name and not last_matches:
-            last_matches = await asyncio.to_thread(_get_recent_results_db, league_id, rival_name)
+        # Últimos partidos del rival desde la BD (datos ya guardados previamente)
+        last_matches: list[dict] = []
+        if rival_name:
+            last_matches = await asyncio.to_thread(_get_recent_matches_db, league_id, rival_name)
 
         if action == "results" and result.get("spy_result"):
             # Spy completo → análisis completo con tácticas + plantilla
@@ -2899,7 +2895,6 @@ async def cmd_squad(interaction: discord.Interaction, slot: str = "0"):
 async def on_ready():
     _load_training_queue()
     _load_transfer_queue()
-    await asyncio.to_thread(_ensure_recent_results_table)
     print(f"✅ Bot conectado como {client.user} (ID: {client.user.id})")
 
     if DISCORD_GUILD_ID:
