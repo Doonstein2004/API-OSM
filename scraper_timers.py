@@ -167,9 +167,9 @@ def _build_timer(raw_text: str, meta: str = "", event_title: str = "") -> dict:
 
 
 def _deduplicate(timers: list[dict]) -> list[dict]:
-    """Un timer por tipo. Si hay varios del mismo tipo, prefiere el de mayor countdown."""
+    """Un timer por tipo. Prioriza is_ready=True sobre en progreso; entre no-ready, el más próximo a expirar."""
     seen: dict[str, dict] = {}
-    for t in sorted(timers, key=lambda x: x["seconds"], reverse=True):
+    for t in sorted(timers, key=lambda x: (not x["is_ready"], x["seconds"])):
         if t["type"] not in seen:
             seen[t["type"]] = t
     return list(seen.values())

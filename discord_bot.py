@@ -54,6 +54,9 @@ _last_scrape_result: list[dict]           = []
 _timer_state: dict[str, int] = {}
 _warned:      set[str]       = set()
 
+# Alternancia de estadio: { league_name: 'training' | 'pitch' } — próxima parte a ampliar
+_stadium_next_part: dict[str, str] = {}
+
 # Cola de entrenamiento: { league_name: { coach_title: player_name } }
 # Persistida en training_queue.json — el bot la carga al arrancar.
 TRAINING_QUEUE_FILE = "training_queue.json"
@@ -165,6 +168,27 @@ def _get_active_leagues(user_id: str) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+def _get_all_active_slots(user_id: str) -> list[dict]:
+    """Combina ligas de la BD con slots activos del timer cache (para ligas nuevas no sincronizadas)."""
+    try:
+        leagues = _get_active_leagues(user_id)
+    except Exception:
+        leagues = []
+    db_names = {lg["league_name"].lower() for lg in leagues}
+    for slot in _last_scrape_result:
+        ln = slot.get("league_name", "")
+        if ln and ln.lower() not in db_names:
+            leagues.append({
+                "league_id":       None,
+                "league_name":     ln,
+                "standings":       None,
+                "managers_by_team": None,
+                "last_scraped_at": None,
+            })
+            db_names.add(ln.lower())
+    return leagues
 
 
 def _get_latest_tactics(league_id: int) -> Optional[dict]:
@@ -847,15 +871,18 @@ def _fmt_seconds(seconds: int) -> str:
 
 def _has_upcoming_bonus_event(slot_events: list[dict], event_type: str) -> tuple[bool, str]:
     """
-    Devuelve (True, event_title) si hay un evento de tipo training/stadium que:
-      - Está activo ahora (según el scraper del foro OSM), O
-      - Empieza en menos de EVENT_DELAY_HOURS horas (foro OSM), O
-      - Aparece en los eventos KO del slot (timers en vivo del dashboard)
+    Devuelve (True, event_title) si hay un evento de tipo training/stadium que
+    AÚN NO empezó pero empieza en menos de EVENT_DELAY_HOURS horas.
+    Si el evento ya está activo, devuelve False: hay que renovar AHORA con
+    los timers reducidos, no esperar.
     """
     from scraper_events import get_upcoming_bonus_events
 
     # ── 1. Foro OSM (más fiable: tiene nombre, tipo y fechas exactas) ─────────
-    forum_events = get_upcoming_bonus_events(event_type, within_hours=EVENT_DELAY_HOURS)
+    # Solo bloquear si el evento todavía no empezó (is_active=False).
+    # Si ya está activo los timers ya son reducidos → renovar ahora.
+    forum_events = [ev for ev in get_upcoming_bonus_events(event_type, within_hours=EVENT_DELAY_HOURS)
+                    if not ev.get("is_active")]
     if forum_events:
         return True, forum_events[0]["name"]
 
@@ -872,6 +899,13 @@ def _has_upcoming_bonus_event(slot_events: list[dict], event_type: str) -> tuple
             return True, ev.get("title", "")
 
     return False, ""
+
+
+def _get_stadium_preferred(league_name: str) -> list[str]:
+    """Devuelve orden de prioridad training↔pitch alternado. Capacity nunca se inicia automáticamente."""
+    first  = _stadium_next_part.get(league_name, "training")
+    second = "pitch" if first == "training" else "training"
+    return [first, second]
 
 
 def _time_ago(dt: Optional[datetime]) -> str:
@@ -1396,7 +1430,7 @@ async def _timer_alert_loop():
                             f"(en < {EVENT_DELAY_HOURS}h). Esperando para aprovechar timers reducidos."
                         )
                     else:
-                        stadium_to_upgrade.append((team, league_name, None))
+                        stadium_to_upgrade.append((team, league_name, _get_stadium_preferred(league_name)))
 
             # Registrar que este slot tiene un timer de estadio (en curso o listo)
             if typ == "stadium":
@@ -1490,6 +1524,12 @@ async def _timer_alert_loop():
             )
             for team, result in batch_results.items():
                 await channel.send(_fmt_stadium_result(result, team))
+                # Actualizar alternancia: si se inició training→próximo es pitch, y viceversa
+                for s in result.get("started", []):
+                    if s.get("type") in ("training", "pitch"):
+                        league = next((lg for t, lg, _ in stadium_to_upgrade if t == team), None)
+                        if league:
+                            _stadium_next_part[league] = "pitch" if s["type"] == "training" else "training"
         except Exception as e:
             await channel.send(f"❌ Error en upgrade de estadios: {e}")
 
@@ -2007,14 +2047,15 @@ def _is_owner(interaction: discord.Interaction) -> bool:
 async def _slot_autocomplete(
     _interaction: discord.Interaction, current: str
 ) -> list[app_commands.Choice[str]]:
-    """Devuelve los equipos activos como opciones para el parámetro slot."""
+    """Devuelve los equipos activos como opciones para el parámetro slot.
+    Incluye ligas del timer cache aunque no estén en la BD todavía."""
     try:
-        leagues = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        leagues = await asyncio.to_thread(_get_all_active_slots, OSM_USER_ID)
     except Exception:
         return []
     return [
-        app_commands.Choice(name=lg["league_name"][:100], value=str(i))
-        for i, lg in enumerate(leagues[:4])
+        app_commands.Choice(name=lg["league_name"][:100], value=lg["league_name"][:100])
+        for lg in leagues[:4]
         if not current or current.lower() in lg["league_name"].lower()
     ][:25]
 
@@ -2058,12 +2099,18 @@ _OFFSIDE_CHOICES = [
 
 
 def _slot_idx(slot_str: str, leagues: list[dict]) -> int | None:
-    """Convierte el valor string del autocomplete a índice validado."""
+    """Convierte el valor del autocomplete (nombre o índice numérico) a índice validado."""
     try:
         idx = int(slot_str)
+        return idx if 0 <= idx < len(leagues) else None
     except (ValueError, TypeError):
-        return None
-    return idx if 0 <= idx < len(leagues) else None
+        pass
+    # Búsqueda por nombre (substring, case-insensitive)
+    s = slot_str.lower()
+    for i, lg in enumerate(leagues):
+        if s in lg["league_name"].lower() or lg["league_name"].lower() in s:
+            return i
+    return None
 
 
 # ── SLASH COMMANDS ────────────────────────────────────────────────────────────
@@ -2256,7 +2303,7 @@ async def cmd_settactics(
         return
 
     try:
-        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        leagues   = await asyncio.to_thread(_get_all_active_slots, OSM_USER_ID)
         idx       = _slot_idx(slot, leagues)
         slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
     except Exception:
@@ -2304,7 +2351,7 @@ async def cmd_renewtraining(interaction: discord.Interaction, slot: str = "0"):
         return
 
     try:
-        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        leagues   = await asyncio.to_thread(_get_all_active_slots, OSM_USER_ID)
         idx       = _slot_idx(slot, leagues)
         slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
     except Exception:
@@ -2389,7 +2436,7 @@ async def cmd_upgradestadium(
         return
 
     try:
-        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        leagues   = await asyncio.to_thread(_get_all_active_slots, OSM_USER_ID)
         idx       = _slot_idx(slot, leagues)
         slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
     except Exception:
@@ -2448,7 +2495,7 @@ async def cmd_setlineup(
         return
 
     try:
-        leagues   = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        leagues   = await asyncio.to_thread(_get_all_active_slots, OSM_USER_ID)
         idx       = _slot_idx(slot, leagues)
         slot_name = leagues[idx]["league_name"] if idx is not None else "Equipo"
     except Exception:
@@ -2827,7 +2874,7 @@ async def cmd_queuetraining(interaction: discord.Interaction, slot: str = "0"):
 
     await interaction.response.defer(thinking=True)
     try:
-        leagues = await asyncio.to_thread(_get_active_leagues, OSM_USER_ID)
+        leagues = await asyncio.to_thread(_get_all_active_slots, OSM_USER_ID)
         idx = _slot_idx(slot, leagues)
         if idx is None:
             await interaction.followup.send("Equipo no encontrado. Usa el autocompletado para seleccionarlo.")
