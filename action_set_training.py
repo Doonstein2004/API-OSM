@@ -247,10 +247,19 @@ def _open_player_modal(page: Page, slot_index: int) -> bool:
     return False
 
 
-def _select_player_in_modal(page: Page, player_name: str) -> str | None:
+_COACH_STAT_KEY = {
+    "attacking coach":   "statAtt",
+    "midfielder coach":  "statOvr",
+    "defending coach":   "statDef",
+    "goalkeeping coach": "statDef",
+}
+
+
+def _select_player_in_modal(page: Page, player_name: str, coach_type: str = "") -> str | None:
     """
-    Espera a que #modal-dialog-trainplayer esté visible y selecciona el jugador
-    cuyo nombre coincide con player_name. Usa KO setPlayer() directamente.
+    Espera a que #modal-dialog-trainplayer esté visible y selecciona el jugador.
+    Si player_name está vacío, elige el jugador con mayor stat para el coach_type dado.
+    Usa KO setPlayer() directamente.
     Devuelve el nombre del jugador seleccionado, o None si no se encontró.
     """
     try:
@@ -326,20 +335,63 @@ def _select_player_in_modal(page: Page, player_name: str) -> str | None:
         except Exception as e:
             print(f"  ⚠️ setPlayer KO error: {e}")
 
-    # Fallback final: seleccionar el primero no lesionado de la lista
-    print(f"  ⚠️ Jugador '{player_name}' no encontrado — seleccionando el primero disponible")
+    # Fallback: seleccionar el jugador con mayor stat relevante para el coach_type
+    stat_key = _COACH_STAT_KEY.get(coach_type.lower(), "statOvr")
+    reason   = f"mejor {stat_key}" if coach_type else "primero disponible"
+    print(f"  ⚠️ Jugador '{player_name}' no encontrado — seleccionando por {reason}")
     try:
-        first = page.locator("#squad-table tr.player-table-row:not(.disabled)").first
-        if first.is_visible(timeout=2000):
-            name_el = first.locator("span[data-bind='text: name']").first
-            name    = name_el.inner_text(timeout=500).strip() if name_el.count() else "desconocido"
-            first.click()
+        selected = page.evaluate(f"""
+            (function() {{
+                const statKey = {json.dumps(stat_key)};
+                function v(o) {{ return typeof o === 'function' ? o() : o; }}
+                const modal = document.querySelector('#modal-dialog-trainplayer') ||
+                              document.querySelector('#squad-table');
+                if (!modal) return null;
+
+                // Intentar via KO: buscar el jugador con mayor stat
+                try {{
+                    const ctx = ko.contextFor(modal);
+                    const root = ctx && (ctx.$root || ctx.$data);
+                    if (root && root.playersGroupablePartial) {{
+                        const groupable = typeof root.playersGroupablePartial === 'function'
+                            ? root.playersGroupablePartial() : root.playersGroupablePartial;
+                        if (groupable && typeof groupable.getPlayers === 'function') {{
+                            let best = null, bestStat = -1;
+                            for (const group of groupable.getPlayers()) {{
+                                for (const player of group.players.getItems()) {{
+                                    if (player.isInjured && player.isInjured()) continue;
+                                    const stat = v(player[statKey]) || v(player.statOvr) || 0;
+                                    if (stat > bestStat) {{ bestStat = stat; best = player; }}
+                                }}
+                            }}
+                            if (best) {{
+                                root.setPlayer(best,
+                                    '{{Player}} está empezando',
+                                    'Los jugadores no pueden estar en la alineación y entrenar a la vez. ¿Quieres quitar a {{Player}} del once inicial?'
+                                );
+                                return v(best.name) || '';
+                            }}
+                        }}
+                    }}
+                }} catch(e) {{}}
+
+                // Fallback DOM: primer no lesionado
+                const first = document.querySelector('#squad-table tr.player-table-row:not(.disabled)');
+                if (first) {{
+                    const nameEl = first.querySelector('span[data-bind="text: name"]');
+                    first.click();
+                    return nameEl ? nameEl.innerText.trim() : 'desconocido';
+                }}
+                return null;
+            }})()
+        """)
+        if selected:
+            print(f"  ✓ Modal: seleccionado por {reason} = {selected!r}")
             time.sleep(1)
             handle_popups(page)
-            print(f"  ✓ Modal: primer jugador disponible = {name!r}")
-            return name
+            return selected
     except Exception as e:
-        print(f"  ⚠️ fallback primer jugador: {e}")
+        print(f"  ⚠️ fallback por stat: {e}")
 
     return None
 
@@ -421,7 +473,7 @@ def renew_training(page: Page, queued_players: dict | None = None) -> dict:
             errors.append(f"modal_failed:slot{s['index']}")
             continue
 
-        selected = _select_player_in_modal(page, player_to_use)
+        selected = _select_player_in_modal(page, player_to_use, coach_type=s["title"])
         if selected:
             started.append({"slot": s["index"], "title": s["title"], "player": selected})
         else:

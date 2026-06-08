@@ -292,14 +292,15 @@ def fetch_events(force: bool = False) -> list[dict]:
 
 def get_upcoming_bonus_events(event_type: str, within_hours: float = 2.0) -> list[dict]:
     """
-    Devuelve eventos del tipo indicado que empiezan en menos de `within_hours` horas.
-    Si hay un evento activo de ese tipo, también se incluye.
+    Devuelve eventos del tipo indicado que empiezan en menos de `within_hours` horas,
+    o que están activos ahora. Excluye eventos ya terminados.
     """
     threshold = within_hours * 3600
     events = fetch_events()
     return [
         ev for ev in events
         if ev["type"] == event_type
+        and ev.get("seconds_until_end", 0) > 0   # excluir eventos ya terminados
         and (ev["is_active"] or ev["seconds_until_start"] <= threshold)
     ]
 

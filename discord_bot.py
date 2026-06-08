@@ -54,8 +54,6 @@ _last_scrape_result: list[dict]           = []
 _timer_state: dict[str, int] = {}
 _warned:      set[str]       = set()
 
-# Alternancia de estadio: { league_name: 'training' | 'pitch' } — próxima parte a ampliar
-_stadium_next_part: dict[str, str] = {}
 
 # Cola de entrenamiento: { league_name: { coach_title: player_name } }
 # Persistida en training_queue.json — el bot la carga al arrancar.
@@ -901,11 +899,9 @@ def _has_upcoming_bonus_event(slot_events: list[dict], event_type: str) -> tuple
     return False, ""
 
 
-def _get_stadium_preferred(league_name: str) -> list[str]:
-    """Devuelve orden de prioridad training↔pitch alternado. Capacity nunca se inicia automáticamente."""
-    first  = _stadium_next_part.get(league_name, "training")
-    second = "pitch" if first == "training" else "training"
-    return [first, second]
+def _get_stadium_preferred(_league_name: str) -> list[str]:
+    """Prioridad fija: training primero, luego pitch, capacity de último."""
+    return ["training", "pitch", "capacity"]
 
 
 def _time_ago(dt: Optional[datetime]) -> str:
@@ -1403,33 +1399,39 @@ async def _timer_alert_loop():
             # Timer listo
             done_key = f"{key}_done"
             if is_ready and done_key not in _warned:
+                print(f"  [loop] ✅ {typ} listo en '{team}'")
                 await channel.send(f"✅ **{emoji} {label}** listo en **{team}**!")
                 _warned.add(done_key)
 
                 if typ == "training" and league_name:
                     if matchday.get("finished", False):
                         md = matchday
+                        print(f"  [loop] ⏸ temporada terminada ({md['current']}/{md['total']}) — entrenamiento omitido")
                         await channel.send(
                             f"⏸ Temporada terminada (**{md['current']}/{md['total']}**) en **{team}** — entrenamiento omitido."
                         )
                     else:
                         has_ev, ev_title = _has_upcoming_bonus_event(slot_events, "training")
                         if has_ev:
+                            print(f"  [loop] ⏳ evento training próximo '{ev_title}' — esperando")
                             await channel.send(
                                 f"⏳ **{team}**: evento de entrenamiento próximo — **{ev_title}** "
                                 f"(en < {EVENT_DELAY_HOURS}h). Esperando para aprovechar timers reducidos."
                             )
                         else:
+                            print(f"  [loop] 🔄 '{team}' añadido a training_to_renew")
                             training_to_renew.append((team, league_name))
 
                 elif typ == "stadium" and league_name:
                     has_ev, ev_title = _has_upcoming_bonus_event(slot_events, "stadium")
                     if has_ev:
+                        print(f"  [loop] ⏳ evento stadium próximo '{ev_title}' — esperando")
                         await channel.send(
                             f"⏳ **{team}**: evento de estadio próximo — **{ev_title}** "
                             f"(en < {EVENT_DELAY_HOURS}h). Esperando para aprovechar timers reducidos."
                         )
                     else:
+                        print(f"  [loop] 🏟️ stadium timer listo '{team}' — añadido a upgrade")
                         stadium_to_upgrade.append((team, league_name, _get_stadium_preferred(league_name)))
 
             # Registrar que este slot tiene un timer de estadio (en curso o listo)
@@ -1482,11 +1484,12 @@ async def _timer_alert_loop():
                 and not any(lg == league_name for _, lg, _ in stadium_to_upgrade)):
             has_ev, ev_title = _has_upcoming_bonus_event(slot_events, "stadium")
             if has_ev:
-                # No añadir al batch — esperar el evento
-                pass
+                print(f"  [loop] ⏳ evento stadium próximo '{ev_title}' en '{team}' — esperando")
             else:
-                stadium_to_upgrade.append((team, league_name, None))
+                print(f"  [loop] 🏟️ '{team}' sin timer de estadio — añadido a upgrade proactivo")
+                stadium_to_upgrade.append((team, league_name, _get_stadium_preferred(league_name)))
 
+    print(f"  [loop] resumen → training_to_renew={[t for t,_ in training_to_renew]} | stadium_to_upgrade={[t for t,_,_ in stadium_to_upgrade]}")
     # ── Renovar entrenamientos en una sola sesión de Playwright ──────────────
     if training_to_renew:
         teams_str = ", ".join(t for t, _ in training_to_renew)
@@ -1524,12 +1527,6 @@ async def _timer_alert_loop():
             )
             for team, result in batch_results.items():
                 await channel.send(_fmt_stadium_result(result, team))
-                # Actualizar alternancia: si se inició training→próximo es pitch, y viceversa
-                for s in result.get("started", []):
-                    if s.get("type") in ("training", "pitch"):
-                        league = next((lg for t, lg, _ in stadium_to_upgrade if t == team), None)
-                        if league:
-                            _stadium_next_part[league] = "pitch" if s["type"] == "training" else "training"
         except Exception as e:
             await channel.send(f"❌ Error en upgrade de estadios: {e}")
 
